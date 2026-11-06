@@ -97,18 +97,14 @@ class AsyncModelBackend(ModelBackend):
 
 
 async def aupdate_last_login(sender, user, **kwargs):
-    """Async replacement for ``django.contrib.auth.models.update_last_login``.
+    """Async replacement for `django.contrib.auth.models.update_last_login`.
 
-    ``Signal.asend()`` runs async receivers concurrently, each in its own
-    task, so this cannot use the connection of the task that called
-    ``alogin()``. It takes a connection of its own for the one UPDATE, which
-    therefore commits independently of any transaction around the login.
+    Runs in the task that called `alogin()` (see
+    `django_async_backend.dispatch`), on its connection and inside its
+    transaction, exactly like Django's sync receiver.
     """
-    from django_async_backend.db import async_acquire
-
     user.last_login = timezone.now()
-    async with async_acquire(allow_outside_atomic=True):
-        await user.async_save(update_fields=["last_login"])
+    await user.async_save(update_fields=["last_login"])
 
 
 def patch_last_login():

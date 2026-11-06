@@ -261,6 +261,17 @@ with `asend()`. The plain `instance.<related>` manager (and its own `a*`
 methods) is still Django's thread-backed sync ORM. Generic relations are not
 covered.
 
+### Signals
+
+`Signal.asend()` normally runs async receivers concurrently, each in its own
+task, which cannot use the sender's connection. The backend replaces that
+runner on startup so async receivers run **sequentially in the sender's
+task**, on its connection and inside its transaction, like sync receivers do
+under WSGI. Set `ASYNC_BACKEND_SEQUENTIAL_SIGNAL_RECEIVERS = False` to keep
+Django's parallel behaviour. Sync receivers are still dispatched through
+`sync_to_async()` on the *sync* connection, outside the async transaction:
+inside `async_atomic()`, receivers that touch the database must be `async`.
+
 ### Custom descriptors
 
 A custom descriptor or manager takes part in `prefetch_related()` by

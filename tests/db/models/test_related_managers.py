@@ -320,20 +320,28 @@ class ManyToManyManagerTests(AsyncioTestCase):
             ],
         )
 
-    async def test_async_receivers_cannot_use_the_connection(self):
-        # Signal.asend() runs async receivers through asyncio.gather(), i.e.
-        # in their own tasks, which do not own the task's connection. A
-        # receiver that queries therefore fails loudly instead of silently
-        # running on another connection.
-        async def receiver(sender, **kwargs):
-            await sender.async_objects.acount()
+    async def test_async_receivers_run_in_the_senders_task(self):
+        # The backend runs async receivers sequentially in the sender's
+        # task (django_async_backend.dispatch), so they use the sender's
+        # connection and see the uncommitted through rows.
+        seen = []
+
+        async def receiver(sender, action, instance, pk_set, **kwargs):
+            if action == "post_add":
+                seen.append(
+                    await sender.async_objects.filter(
+                        m2mownermodel=instance
+                    ).acount()
+                )
 
         m2m_changed.connect(receiver, sender=M2MOwnerModel.tags.through)
         try:
-            with self.assertRaises(RuntimeError):
-                await self.owner.tags.async_objects.aadd(self.t1)
+            async with async_atomic():
+                await self.owner.tags.async_objects.aadd(self.t1, self.t2)
         finally:
             m2m_changed.disconnect(receiver, sender=M2MOwnerModel.tags.through)
+
+        self.assertEqual(seen, [2])
 
     async def test_prefetched_cache_is_dropped_on_write(self):
         await self.owner.tags.async_objects.aadd(self.t1)

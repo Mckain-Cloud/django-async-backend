@@ -30,6 +30,13 @@ class DjangoAsyncBackendConfig(AppConfig):
         _patch_model()
         check_middleware()
 
+        if getattr(
+            settings, "ASYNC_BACKEND_SEQUENTIAL_SIGNAL_RECEIVERS", True
+        ):
+            from django_async_backend.dispatch import patch_signal_dispatch
+
+            patch_signal_dispatch()
+
         if getattr(settings, "ASYNC_BACKEND_ASYNC_LAST_LOGIN", False):
             from django_async_backend.contrib.auth import patch_last_login
 

@@ -1,3 +1,5 @@
+import asyncio
+
 from asgiref.sync import sync_to_async
 from django.contrib.auth import (
     alogin,
@@ -16,10 +18,8 @@ from django_async_backend.contrib.auth import (
     aupdate_last_login,
 )
 from django_async_backend.contrib.sessions import SessionStore
-from django_async_backend.test import (
-    AsyncioTestCase,
-    AsyncioTransactionTestCase,
-)
+from django_async_backend.db.transaction import async_atomic
+from django_async_backend.test import AsyncioTestCase
 
 User = get_user_model()
 BACKEND = "django_async_backend.contrib.auth.AsyncModelBackend"
@@ -151,17 +151,9 @@ async def _close_sync_connections():
     await sync_to_async(connections.close_all)()
 
 
-class AsyncLastLoginTests(AsyncioTransactionTestCase):
-    # The last_login receiver commits on a connection of its own (asend()
-    # runs it in another task), so this cannot run inside a test transaction.
+class AsyncLastLoginTests(AsyncioTestCase):
     async def asyncSetUp(self):
         self.user = await make_user("alice")
-
-    async def asyncTearDown(self):
-        from django.contrib.sessions.models import Session
-
-        await Session.async_objects.all().adelete()
-        await User.async_objects.all().adelete()
 
     async def test_async_receiver_is_connected(self):
         receivers = [r[1]() for r in user_logged_in.receivers]
@@ -180,3 +172,28 @@ class AsyncLastLoginTests(AsyncioTransactionTestCase):
         self.assertEqual(
             await request.session.aget("_auth_user_id"), str(self.user.pk)
         )
+
+    async def test_signup_then_login_in_one_transaction(self):
+        # Regression: the receiver used to run on a second connection, where
+        # the uncommitted user row was invisible (NotUpdated).
+        async with async_atomic():
+            user = await make_user("newbie")
+            request = AsyncRequestFactory().get("/")
+            request.session = SessionStore()
+            await alogin(request, user, backend=BACKEND)
+            self.assertIsNotNone(user.last_login)
+
+    async def test_login_after_updating_the_user_in_the_same_transaction(self):
+        # Regression: a second connection would block on the row lock held
+        # by this transaction, deadlocking the request against itself.
+        async with async_atomic():
+            self.user.first_name = "touched"
+            await self.user.async_save(update_fields=["first_name"])
+            request = AsyncRequestFactory().get("/")
+            request.session = SessionStore()
+            await asyncio.wait_for(
+                alogin(request, self.user, backend=BACKEND), timeout=5
+            )
+        stored = await User.async_objects.aget(pk=self.user.pk)
+        self.assertEqual(stored.first_name, "touched")
+        self.assertIsNotNone(stored.last_login)
