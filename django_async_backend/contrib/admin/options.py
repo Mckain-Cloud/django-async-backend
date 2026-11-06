@@ -12,9 +12,9 @@ What changes versus Django's ``ModelAdmin``:
   reads.
 * Template responses are rendered in the view's task.
 
-Not supported (they would query during template rendering): ``date_hierarchy``
-and facet counts (``show_facets`` is forced to ``NEVER``). ``SimpleListFilter``
-subclasses must not query in ``lookups()``.
+``date_hierarchy`` and facet counts are precomputed by ``AsyncChangeList``;
+list filters that need queries must be the async variants (plain field names
+are mapped automatically; custom ones subclass ``AsyncSimpleListFilter``).
 """
 
 import copy
@@ -231,8 +231,6 @@ class AsyncBaseModelAdminMixin:
 
 
 class AsyncModelAdmin(AsyncBaseModelAdminMixin, ModelAdmin):
-    show_facets = ShowFacets.NEVER
-
     def get_changelist(self, request, **kwargs):
         return AsyncChangeList
 
@@ -432,6 +430,11 @@ class AsyncModelAdmin(AsyncBaseModelAdminMixin, ModelAdmin):
         return await aget_deleted_objects(objs, request, self.admin_site)
 
     async def _acreate_formsets(self, request, obj, change):
+        # Generic inline formsets look the parent's ContentType up through
+        # Django's sync cache: fill it on the async connection first.
+        if obj is not None:
+            await aget_for_model(obj.__class__)
+            await aget_for_model(obj.__class__, for_concrete_model=False)
         formsets = []
         inline_instances = []
         prefixes = {}
@@ -1215,6 +1218,97 @@ class AsyncStackedInline(AsyncInlineModelAdmin):
 
 
 class AsyncTabularInline(AsyncInlineModelAdmin):
+    template = "admin/edit_inline/tabular.html"
+
+
+class AsyncGenericInlineModelAdmin(AsyncBaseModelAdminMixin, InlineModelAdmin):
+    """Inline over a ``GenericForeignKey`` (``GenericInlineModelAdmin``)."""
+
+    ct_field = "content_type"
+    ct_fk_field = "object_id"
+    formset = None  # AsyncBaseGenericInlineFormSet, resolved lazily
+
+    @property
+    def checks_class(self):
+        from django.contrib.contenttypes.admin import (
+            GenericInlineModelAdminChecks,
+        )
+
+        return GenericInlineModelAdminChecks
+
+    def get_formset(self, request, obj=None, **kwargs):
+        from django_async_backend.forms.models import (
+            AsyncBaseGenericInlineFormSet,
+            async_generic_inlineformset_factory,
+        )
+
+        if "fields" in kwargs:
+            fields = kwargs.pop("fields")
+        else:
+            fields = flatten_fieldsets(self.get_fieldsets(request, obj))
+        excluded = self.get_exclude(request, obj)
+        exclude = [
+            *(excluded or []),
+            *self.get_readonly_fields(request, obj),
+        ]
+        if (
+            excluded is None
+            and hasattr(self.form, "_meta")
+            and self.form._meta.exclude
+        ):
+            exclude.extend(self.form._meta.exclude)
+        exclude = exclude or None
+        can_delete = self.can_delete and self.has_delete_permission(
+            request, obj
+        )
+        defaults = {
+            "ct_field": self.ct_field,
+            "fk_field": self.ct_fk_field,
+            "form": self.form,
+            "formfield_callback": partial(
+                self.formfield_for_dbfield, request=request
+            ),
+            "formset": self.formset or AsyncBaseGenericInlineFormSet,
+            "extra": self.get_extra(request, obj),
+            "can_delete": can_delete,
+            "can_order": False,
+            "fields": fields,
+            "min_num": self.get_min_num(request, obj),
+            "max_num": self.get_max_num(request, obj),
+            "exclude": exclude,
+            **kwargs,
+        }
+        base_model_form = defaults["form"]
+        if not issubclass(base_model_form, AsyncModelForm):
+            base_model_form = type(
+                base_model_form.__name__, (AsyncModelForm, base_model_form), {}
+            )
+        can_change = (
+            self.has_change_permission(request, obj) if request else True
+        )
+        can_add = self.has_add_permission(request, obj) if request else True
+
+        class PermissionProtectedModelForm(base_model_form):
+            def has_changed(self):
+                if not can_change and not self.instance._state.adding:
+                    return False
+                if not can_add and self.instance._state.adding:
+                    return False
+                return super().has_changed()
+
+        defaults["form"] = PermissionProtectedModelForm
+        if defaults["fields"] is None and not modelform_defines_fields(
+            defaults["form"]
+        ):
+            defaults["fields"] = forms.ALL_FIELDS
+        return async_generic_inlineformset_factory(self.model, **defaults)
+
+
+class AsyncGenericStackedInline(AsyncGenericInlineModelAdmin):
+    template = "admin/edit_inline/stacked.html"
+
+
+class AsyncGenericTabularInline(AsyncGenericInlineModelAdmin):
     template = "admin/edit_inline/tabular.html"
 
 

@@ -361,3 +361,65 @@ class ManyToManyManagerTests(AsyncioTestCase):
             self.assertEqual(await self.owner.tags.async_objects.acount(), 1)
             self.assertEqual(await self.owner.tags.acount(), 0)  # thread hop
             await _close_sync_connections()
+
+
+class GenericRelatedManagerTests(AsyncioTestCase):
+    async def asyncSetUp(self):
+        from test_app.models import GenericRelationModel
+
+        from django_async_backend.utils.contenttypes import aget_for_model
+
+        await aget_for_model(GenericRelationModel)
+        self.parent = await GenericRelationModel.async_objects.acreate(
+            name="parent"
+        )
+        self.other = await GenericRelationModel.async_objects.acreate(
+            name="other"
+        )
+
+    async def _names(self, manager):
+        return sorted(
+            [n async for n in manager.values_list("name", flat=True)]
+        )
+
+    async def test_create_add_remove_clear_set(self):
+        from test_app.models import GenericChildModel
+
+        manager = self.parent.children.async_objects
+        c1 = await manager.acreate(name="c1")
+        self.assertEqual(c1.object_id, self.parent.pk)
+        self.assertEqual(await self._names(manager), ["c1"])
+
+        c2 = await GenericChildModel.async_objects.acreate(
+            name="c2",
+            content_type=c1.content_type,
+            object_id=self.other.pk,
+        )
+        await manager.aadd(c2)
+        self.assertEqual(await self._names(manager), ["c1", "c2"])
+        self.assertEqual(
+            await self._names(self.other.children.async_objects), []
+        )
+
+        await manager.aremove(c1)
+        self.assertEqual(await self._names(manager), ["c2"])
+        self.assertFalse(
+            await GenericChildModel.async_objects.filter(pk=c1.pk).aexists()
+        )
+
+        c3 = GenericChildModel(name="c3")
+        await manager.aadd(c3, bulk=False)
+        self.assertEqual(await self._names(manager), ["c2", "c3"])
+
+        await manager.aset([c2])
+        self.assertEqual(await self._names(manager), ["c2"])
+        await manager.aclear()
+        self.assertEqual(await self._names(manager), [])
+
+    async def test_get_or_create(self):
+        manager = self.parent.children.async_objects
+        child, created = await manager.aget_or_create(name="x")
+        self.assertTrue(created)
+        self.assertEqual(child.object_id, self.parent.pk)
+        _, created = await manager.aget_or_create(name="x")
+        self.assertFalse(created)

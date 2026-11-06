@@ -15,6 +15,108 @@ from django.http import JsonResponse
 from django_async_backend.contrib.admin.utils import PreparedPaginator
 
 
+class _DateHierarchyQuerySet:
+    """Stand-in for ``cl.queryset`` once results are loaded.
+
+    The ``date_hierarchy`` template tag calls ``aggregate(Min, Max)`` and
+    ``dates()``/``datetimes()`` on it while rendering. Those answers are
+    computed here ahead of time; everything else is delegated.
+    """
+
+    def __init__(self, queryset, date_range, buckets):
+        self._queryset = queryset
+        self._date_range = date_range
+        self._buckets = buckets
+
+    @classmethod
+    async def abuild(cls, cl):
+        from django.contrib.admin.utils import get_fields_from_path
+        from django.db import models as dj_models
+
+        field_name = cl.date_hierarchy
+        field = get_fields_from_path(cl.model, field_name)[-1]
+        kind_method = (
+            "datetimes"
+            if isinstance(field, dj_models.DateTimeField)
+            else "dates"
+        )
+        year = cl.params.get("%s__year" % field_name)
+        month = cl.params.get("%s__month" % field_name)
+        day = cl.params.get("%s__day" % field_name)
+        date_range = None
+        if not (year or month or day):
+            date_range = await cl.queryset.aaggregate(
+                first=dj_models.Min(field_name), last=dj_models.Max(field_name)
+            )
+            # The tag narrows to year/month when the range is within one.
+            first, last = date_range["first"], date_range["last"]
+            if first and last and first.year == last.year:
+                year = first.year
+                if first.month == last.month:
+                    month = first.month
+        if year and month and day:
+            buckets = {}
+        elif year and month:
+            kind = "day"
+            buckets = {
+                kind: [
+                    d
+                    async for d in getattr(cl.queryset, kind_method)(
+                        field_name, kind
+                    )
+                ]
+            }
+        elif year:
+            kind = "month"
+            buckets = {
+                kind: [
+                    d
+                    async for d in getattr(cl.queryset, kind_method)(
+                        field_name, kind
+                    )
+                ]
+            }
+        else:
+            kind = "year"
+            buckets = {
+                kind: [
+                    d
+                    async for d in getattr(cl.queryset, kind_method)(
+                        field_name, kind
+                    )
+                ]
+            }
+        return cls(cl.queryset, date_range, buckets)
+
+    def aggregate(self, *args, **kwargs):
+        if self._date_range is None:
+            raise TypeError("date range was not precomputed for these params")
+        return self._date_range
+
+    def _prepared(self, field_name, kind, *args, **kwargs):
+        try:
+            return self._buckets[kind]
+        except KeyError:
+            raise TypeError(
+                "date buckets for %r were not precomputed" % kind
+            ) from None
+
+    def dates(self, field_name, kind, *args, **kwargs):
+        return self._prepared(field_name, kind)
+
+    def datetimes(self, field_name, kind, *args, **kwargs):
+        return self._prepared(field_name, kind)
+
+    def __getattr__(self, name):
+        return getattr(self._queryset, name)
+
+    def __getitem__(self, k):
+        return self._queryset[k]
+
+    def __aiter__(self):
+        return self._queryset.__aiter__()
+
+
 class AsyncChangeList(ChangeList):
     """``ChangeList`` whose results are fetched by ``await aget_results()``.
 
@@ -41,6 +143,13 @@ class AsyncChangeList(ChangeList):
             spec for spec in self.filter_specs if spec.has_output()
         ]
         self.has_filters = bool(self.filter_specs)
+        if self.add_facets:
+            for spec in self.filter_specs:
+                if hasattr(spec, "aload_facets"):
+                    await spec.aload_facets(self)
+
+        if self.date_hierarchy:
+            self.queryset = await _DateHierarchyQuerySet.abuild(self)
 
         result_count = await self.queryset.acount()
         if self.model_admin.show_full_result_count:

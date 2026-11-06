@@ -74,6 +74,29 @@ async def _fetch_deferred(descriptor, instance):
     return value
 
 
+async def _fetch_generic_foreign_key(descriptor, instance):
+    from django_async_backend.utils.contenttypes import aget_for_id
+
+    field = descriptor.field
+    ct_attname = field.model._meta.get_field(field.ct_field).attname
+    ct_id = getattr(instance, ct_attname, None)
+    pk_val = getattr(instance, field.fk_field)
+    rel_obj = None
+    if ct_id is not None and pk_val is not None:
+        ct = await aget_for_id(ct_id, using=instance._state.db)
+        model = ct.model_class()
+        if model is not None:
+            rel_obj = (
+                await model.async_objects.using(instance._state.db)
+                .filter(pk=pk_val)
+                .afirst()
+            )
+            if rel_obj is not None:
+                rel_obj._state.fetch_mode = instance._state.fetch_mode
+    field.set_cached_value(instance, rel_obj)
+    return rel_obj
+
+
 async def _fetch_multi(name, instance):
     from django_async_backend.db.models.query import prefetch_related_objects
 
@@ -104,6 +127,8 @@ async def afetch(self, *names):
             values.append(await _fetch_reverse_one_to_one(descriptor, self))
         elif isinstance(descriptor, DeferredAttribute):
             values.append(await _fetch_deferred(descriptor, self))
+        elif type(descriptor).__name__ == "GenericForeignKeyDescriptor":
+            values.append(await _fetch_generic_foreign_key(descriptor, self))
         elif hasattr(descriptor, "related_manager_cls") or hasattr(
             descriptor, "rel"
         ):

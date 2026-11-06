@@ -141,3 +141,29 @@ class AfetchTests(AsyncioTestCase):
         )
         child = await TestModel.async_objects.aget(pk=child.pk)
         self.assertEqual((await child.afetch("relative")).pk, parent.pk)
+
+
+class AfetchGenericTests(AsyncioTestCase):
+    async def test_generic_foreign_key_and_relation(self):
+        from test_app.models import (
+            GenericChildModel,
+            GenericRelationModel,
+        )
+
+        from django_async_backend.utils.contenttypes import aget_for_model
+
+        ct = await aget_for_model(GenericRelationModel)
+        parent = await GenericRelationModel.async_objects.acreate(name="p")
+        child = await GenericChildModel.async_objects.acreate(
+            name="c", content_type=ct, object_id=parent.pk
+        )
+
+        child = await GenericChildModel.async_objects.aget(pk=child.pk)
+        loaded = await child.afetch("content_object")
+        self.assertEqual(loaded, parent)
+        self.assertIs(child.content_object, loaded)
+
+        parent = await GenericRelationModel.async_objects.aget(pk=parent.pk)
+        children = await parent.afetch("children")
+        self.assertEqual([c.name for c in children], ["c"])
+        self.assertEqual([c.name for c in parent.children.all()], ["c"])

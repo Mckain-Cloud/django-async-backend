@@ -406,3 +406,135 @@ class AsyncAdminTests(AsyncioTransactionTestCase):
             self.assertEqual(r.status_code, 302)
         await self.admin.async_refresh_from_db()
         self.assertTrue(self.admin.check_password("a-much-longer-password-1"))
+
+
+class AsyncAdminFiltersAndGenericTests(AsyncioTransactionTestCase):
+    async def asyncSetUp(self):
+        import datetime
+
+        from test_app.models import DatesModel
+
+        self.client = AsyncClient()
+        self.admin = User(username="root", is_staff=True, is_superuser=True)
+        self.admin.set_password("pw")
+        await self.admin.async_save()
+        for name, date in (
+            ("apple", datetime.date(2024, 1, 5)),
+            ("avocado", datetime.date(2024, 1, 20)),
+            ("banana", datetime.date(2024, 3, 1)),
+            ("cherry", datetime.date(2025, 6, 1)),
+        ):
+            await DatesModel.async_objects.acreate(name=name, date=date)
+        r = await self.client.post(
+            "/admin/login/", {"username": "root", "password": "pw"}
+        )
+        assert r.status_code == 302, r.content[:200]
+
+    async def asyncTearDown(self):
+        from django.contrib.sessions.models import Session
+        from test_app.models import (
+            DatesModel,
+            GenericChildModel,
+            GenericRelationModel,
+        )
+
+        await _close_sync_connections()
+        for model in (
+            LogEntry,
+            DatesModel,
+            GenericChildModel,
+            GenericRelationModel,
+            User,
+            Session,
+        ):
+            await model.async_objects.all().adelete()
+
+    async def test_simple_filter_facets_and_date_hierarchy(self):
+        url = "/admin/test_app/datesmodel/"
+        with no_sync_queries():
+            r = await self.client.get(url)
+            self.assertEqual(r.status_code, 200)
+            body = r.content.decode()
+            # AsyncSimpleListFilter choices, with facet counts.
+            self.assertIn("By initial", body)
+            self.assertIn("A (2)", body)
+            self.assertIn("B (1)", body)
+            # Date filter facets (today / past 7 days / ... all zero or counts).
+            self.assertIn("Any date", body)
+            # Date hierarchy top level: years.
+            self.assertIn("date__year=2024", body)
+            self.assertIn("date__year=2025", body)
+
+            r = await self.client.get(url, {"initial": "a"})
+            self.assertEqual(r.content.decode().count('class="field-name"'), 2)
+
+            r = await self.client.get(url, {"date__year": "2024"})
+            body = r.content.decode()
+            self.assertIn("date__month=1", body)
+            self.assertIn("date__month=3", body)
+            self.assertEqual(body.count('class="field-name"'), 3)
+
+            r = await self.client.get(
+                url, {"date__year": "2024", "date__month": "1"}
+            )
+            body = r.content.decode()
+            self.assertIn("date__day=5", body)
+            self.assertIn("date__day=20", body)
+
+            r = await self.client.get(
+                url,
+                {"date__year": "2024", "date__month": "1", "date__day": "5"},
+            )
+            self.assertEqual(r.content.decode().count('class="field-name"'), 1)
+
+    async def test_generic_inline(self):
+        from test_app.models import (
+            GenericChildModel,
+            GenericRelationModel,
+        )
+
+        from django_async_backend.utils.contenttypes import aget_for_model
+
+        await aget_for_model(
+            GenericRelationModel
+        )  # generic managers read the cache
+        parent = await GenericRelationModel.async_objects.acreate(
+            name="parent"
+        )
+        await parent.children.async_objects.acreate(name="existing")
+        url = "/admin/test_app/genericrelationmodel/%s/change/" % parent.pk
+        prefix = "test_app-genericchildmodel-content_type-object_id"
+        with no_sync_queries():
+            r = await self.client.get(url)
+            self.assertEqual(r.status_code, 200)
+            body = r.content.decode()
+            self.assertIn("existing", body)
+            self.assertIn(prefix + "-TOTAL_FORMS", body)
+            existing = await GenericChildModel.async_objects.aget(
+                name="existing"
+            )
+            r = await self.client.post(
+                url,
+                {
+                    "name": "parent",
+                    f"{prefix}-TOTAL_FORMS": "2",
+                    f"{prefix}-INITIAL_FORMS": "1",
+                    f"{prefix}-MIN_NUM_FORMS": "0",
+                    f"{prefix}-MAX_NUM_FORMS": "1000",
+                    f"{prefix}-0-id": existing.pk,
+                    f"{prefix}-0-name": "existing-renamed",
+                    f"{prefix}-1-id": "",
+                    f"{prefix}-1-name": "new-child",
+                    "_save": "Save",
+                },
+            )
+            self.assertEqual(r.status_code, 302, r.content[:800])
+        names = sorted(
+            [
+                n
+                async for n in parent.children.async_objects.values_list(
+                    "name", flat=True
+                )
+            ]
+        )
+        self.assertEqual(names, ["existing-renamed", "new-child"])

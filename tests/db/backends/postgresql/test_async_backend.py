@@ -435,9 +435,7 @@ class Tests(AsyncioTestCase):
         A custom cursor factory can be configured with DATABASES["options"]
         ["cursor_factory"].
         """
-        from django_async_backend.db.backends.postgresql.base import (
-            AsyncCursor,
-        )
+        from django_async_backend.db.backends.postgresql.base import AsyncCursor
 
         class MyCursor(AsyncCursor):
             pass

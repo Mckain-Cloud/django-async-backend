@@ -582,6 +582,165 @@ def _async_objects_for_m2m(rel, reverse):
     return property(async_objects)
 
 
+_GENERIC_CACHE = {}
+
+
+def create_async_generic_related_manager(rel):
+    """Async counterpart of ``create_generic_related_manager()``.
+
+    The ContentType of the parent must already be in Django's cache (the
+    sync manager that exposes ``async_objects`` looked it up), so no query
+    runs during construction.
+    """
+    try:
+        return _GENERIC_CACHE[rel]
+    except KeyError:
+        pass
+
+    from django.contrib.contenttypes.fields import (
+        create_generic_related_manager,
+    )
+
+    base = create_generic_related_manager(AsyncManager, rel)
+
+    class AsyncGenericRelatedObjectManager(base):
+        def __call__(self, *, manager):
+            raise TypeError(
+                "async_objects does not support selecting another manager; "
+                "use the model's async_objects directly."
+            )
+
+        def _check_and_update_obj(self, obj):
+            if not isinstance(obj, self.model):
+                raise TypeError(
+                    "'%s' instance expected, got %r"
+                    % (self.model._meta.object_name, obj)
+                )
+            setattr(obj, self.content_type_field_name, self.content_type)
+            setattr(obj, self.object_id_field_name, self.pk_val)
+
+        async def aadd(self, *objs, bulk=True):
+            self._remove_prefetched_objects()
+            db = router.db_for_write(self.model, instance=self.instance)
+            if bulk:
+                pks = []
+                for obj in objs:
+                    if obj._state.adding or obj._state.db != db:
+                        raise ValueError(
+                            "%r instance isn't saved. Use bulk=False or save "
+                            "the object first." % obj
+                        )
+                    self._check_and_update_obj(obj)
+                    pks.append(obj.pk)
+                await self.model._async_base_manager.using(db).filter(
+                    pk__in=pks
+                ).aupdate(
+                    **{
+                        self.content_type_field_name: self.content_type,
+                        self.object_id_field_name: self.pk_val,
+                    }
+                )
+            else:
+                async with async_atomic(using=db, savepoint=False):
+                    for obj in objs:
+                        self._check_and_update_obj(obj)
+                        await obj.async_save()
+
+        aadd.alters_data = True
+
+        async def aremove(self, *objs, bulk=True):
+            if not objs:
+                return
+            await self._aclear(self.filter(pk__in=[o.pk for o in objs]), bulk)
+
+        aremove.alters_data = True
+
+        async def aclear(self, *, bulk=True):
+            await self._aclear(self, bulk)
+
+        aclear.alters_data = True
+
+        async def _aclear(self, queryset, bulk):
+            self._remove_prefetched_objects()
+            db = router.db_for_write(self.model, instance=self.instance)
+            queryset = queryset.using(db)
+            if bulk:
+                await queryset.adelete()
+            else:
+                async with async_atomic(using=db, savepoint=False):
+                    async for obj in queryset:
+                        await obj.async_delete()
+
+        _aclear.alters_data = True
+
+        async def aset(self, objs, *, bulk=True, clear=False):
+            objs = tuple(objs)
+            db = router.db_for_write(self.model, instance=self.instance)
+            async with async_atomic(using=db, savepoint=False):
+                if clear:
+                    await self.aclear()
+                    await self.aadd(*objs, bulk=bulk)
+                else:
+                    old_objs = {o async for o in self.using(db).all()}
+                    new_objs = []
+                    for obj in objs:
+                        if obj in old_objs:
+                            old_objs.remove(obj)
+                        else:
+                            new_objs.append(obj)
+                    await self.aremove(*old_objs)
+                    await self.aadd(*new_objs, bulk=bulk)
+
+        aset.alters_data = True
+
+        def _generic_kwargs(self, kwargs):
+            kwargs[self.content_type_field_name] = self.content_type
+            kwargs[self.object_id_field_name] = self.pk_val
+            return kwargs
+
+        async def acreate(self, **kwargs):
+            self._remove_prefetched_objects()
+            db = router.db_for_write(self.model, instance=self.instance)
+            return await self.model.async_objects.using(db).acreate(
+                **self._generic_kwargs(kwargs)
+            )
+
+        acreate.alters_data = True
+
+        async def aget_or_create(self, **kwargs):
+            db = router.db_for_write(self.model, instance=self.instance)
+            return await self.model.async_objects.using(db).aget_or_create(
+                **self._generic_kwargs(kwargs)
+            )
+
+        aget_or_create.alters_data = True
+
+        async def aupdate_or_create(self, **kwargs):
+            db = router.db_for_write(self.model, instance=self.instance)
+            return await self.model.async_objects.using(db).aupdate_or_create(
+                **self._generic_kwargs(kwargs)
+            )
+
+        aupdate_or_create.alters_data = True
+
+    AsyncGenericRelatedObjectManager.__name__ = (
+        "AsyncGenericRelatedObjectManager"
+    )
+    _GENERIC_CACHE[rel] = AsyncGenericRelatedObjectManager
+    return AsyncGenericRelatedObjectManager
+
+
+def _async_objects_for_generic(rel):
+    def async_objects(self):
+        manager = create_async_generic_related_manager(rel)(
+            instance=self.instance
+        )
+        manager._db = self._db
+        return manager
+
+    return property(async_objects)
+
+
 _patched = False
 
 
@@ -614,3 +773,18 @@ def patch_related_managers():
 
     related_descriptors.create_reverse_many_to_one_manager = reverse_factory
     related_descriptors.create_forward_many_to_many_manager = m2m_factory
+
+    try:
+        from django.contrib.contenttypes import fields as generic_fields
+    except ImportError:  # pragma: no cover
+        return
+
+    original_generic = generic_fields.create_generic_related_manager
+
+    def generic_factory(superclass, rel):
+        cls = original_generic(superclass, rel)
+        if not issubclass(superclass, AsyncManager):
+            cls.async_objects = _async_objects_for_generic(rel)
+        return cls
+
+    generic_fields.create_generic_related_manager = generic_factory

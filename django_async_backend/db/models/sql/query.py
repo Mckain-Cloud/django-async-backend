@@ -472,9 +472,7 @@ class Query(BaseExpression):
 
     async def get_aggregation(self, using, aggregate_exprs):
 
-        from django_async_backend.db.models.sql.subqueries import (
-            AggregateQuery,
-        )
+        from django_async_backend.db.models.sql.subqueries import AggregateQuery
 
         if not aggregate_exprs:
             return {}

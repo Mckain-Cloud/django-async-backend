@@ -21,10 +21,18 @@ the async connection.
 from django_async_backend.contrib.admin.actions import adelete_selected
 from django_async_backend.contrib.admin.filters import (
     AsyncAllValuesFieldListFilter,
+    AsyncBooleanFieldListFilter,
+    AsyncChoicesFieldListFilter,
+    AsyncDateFieldListFilter,
+    AsyncEmptyFieldListFilter,
     AsyncRelatedFieldListFilter,
     AsyncRelatedOnlyFieldListFilter,
+    AsyncSimpleListFilter,
 )
 from django_async_backend.contrib.admin.options import (
+    AsyncGenericInlineModelAdmin,
+    AsyncGenericStackedInline,
+    AsyncGenericTabularInline,
     AsyncInlineModelAdmin,
     AsyncModelAdmin,
     AsyncStackedInline,
@@ -36,11 +44,19 @@ from django_async_backend.contrib.admin.views import AsyncChangeList
 __all__ = [
     "AsyncAdminSite",
     "AsyncAllValuesFieldListFilter",
+    "AsyncBooleanFieldListFilter",
     "AsyncChangeList",
+    "AsyncChoicesFieldListFilter",
+    "AsyncDateFieldListFilter",
+    "AsyncEmptyFieldListFilter",
+    "AsyncGenericInlineModelAdmin",
+    "AsyncGenericStackedInline",
+    "AsyncGenericTabularInline",
     "AsyncInlineModelAdmin",
     "AsyncModelAdmin",
     "AsyncRelatedFieldListFilter",
     "AsyncRelatedOnlyFieldListFilter",
+    "AsyncSimpleListFilter",
     "AsyncStackedInline",
     "AsyncTabularInline",
     "adelete_selected",

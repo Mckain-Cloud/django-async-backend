@@ -20,7 +20,6 @@ from django.db import (
     DatabaseError,
     NotSupportedError,
 )
-
 from django.db.backends.signals import connection_created
 from django.db.backends.utils import debug_transaction
 from django.db.transaction import TransactionManagementError
