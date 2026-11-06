@@ -233,8 +233,39 @@ class AsyncModelForm(ModelForm):
     """``ModelForm`` with ``ais_valid()``, ``asave()`` and friends."""
 
     async def aload_choices(self):
-        for field in self.fields.values():
-            if hasattr(field, "aload_choices"):
+        for name, field in self.fields.items():
+            if not hasattr(field, "aload_choices"):
+                continue
+            widget = field.widget
+            while hasattr(widget, "widget") and not hasattr(
+                widget, "needs_selected_rows_only"
+            ):
+                widget = widget.widget  # RelatedFieldWidgetWrapper
+            if getattr(widget, "needs_selected_rows_only", False):
+                # Autocomplete / raw-id widgets only label the current
+                # value(s): load those rows, not the whole table.
+                value = self[name].value()
+                if value in (None, "", []):
+                    values = []
+                elif isinstance(value, (list, tuple)):
+                    values = [getattr(v, "pk", v) for v in value]
+                else:
+                    values = [getattr(value, "pk", value)]
+                key = field.to_field_name or "pk"
+                rows = []
+                if values and field.queryset is not None:
+                    try:
+                        rows = [
+                            o
+                            async for o in field.queryset.filter(
+                                **{"%s__in" % key: values}
+                            )
+                        ]
+                    except (ValueError, TypeError, ValidationError):
+                        rows = []
+                field._async_choices = rows
+                widget._async_rows = rows
+            else:
                 await field.aload_choices()
 
     async def aerrors(self):
