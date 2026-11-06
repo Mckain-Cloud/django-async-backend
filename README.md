@@ -350,9 +350,16 @@ unpatched (then only `arender*` on templates without custom tags works).
 - The admin renders in the view, so `process_template_response` middleware
   sees a rendered response; set `ASYNC_BACKEND_ADMIN_RENDER_IN_VIEW = False`
   to let Django render it (sync engine, worker thread) after those hooks.
-- Object-level permission backends are still called through Django's sync
-  `has_perm()`; a backend that queries per object raises
-  `SynchronousOnlyOperation` in the admin.
+- Object-level permissions: `AsyncModelAdmin` and the inlines have
+  `ahas_add/change/delete/view_permission()` and `ahas_module_permission()`
+  (override these in an async admin). The default answers "model-level
+  permission, or the object-level one when an object is given", through the
+  backends' async API (`user.ahas_perm(perm, obj)`), so a backend that
+  queries per object works. The async views compute every answer Django's
+  sync call sites will ask for ahead of time (`aprepare_permissions()`),
+  including each related object of a delete confirmation and each row of
+  a `list_editable` changelist; the sync `has_*_permission()` methods read
+  that per-request cache.
 
 ### Custom descriptors
 
