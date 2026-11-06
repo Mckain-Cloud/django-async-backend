@@ -300,8 +300,13 @@ run entirely on the task's async connection; the end-to-end tests run every
 request under a guard that fails on any synchronous cursor. Templates are
 still rendered synchronously (in the view's task) from pre-evaluated context,
 so a lazy query inside a template raises instead of running on a thread.
-Not supported: `date_hierarchy`, facet counts, `SimpleListFilter` subclasses
-that query in `lookups()`, and generic relations.
+`date_hierarchy` and facet counts are precomputed by the async changelist.
+Custom list filters subclass `AsyncSimpleListFilter` and implement
+`alookups()`. Generic relations are covered too: `instance.<generic
+relation>.async_objects` managers, `afetch()` of a `GenericForeignKey`, and
+`AsyncGenericStackedInline` / `AsyncGenericTabularInline`. The parent's
+`ContentType` must be in Django's cache before a generic manager is built
+(`await aget_for_model(Model)`); the admin does that itself.
 
 ### Custom descriptors
 
