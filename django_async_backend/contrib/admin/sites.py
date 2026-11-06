@@ -100,6 +100,12 @@ class AsyncAdminSite(AdminSite):
     async def aprepare_request(self, request):
         request.user = await request.auser()
         await awarm_permissions(request.user)
+        # Model-level answers for every registered admin: the index, the
+        # sidebar, menus and buttons ask for them from sync code.
+        if request.user.is_active and request.user.is_staff:
+            for model_admin in self._registry.values():
+                if hasattr(model_admin, "aprepare_permissions"):
+                    await model_admin.aprepare_permissions(request)
 
     def admin_view(self, view, cacheable=False):
         async def inner(request, *args, **kwargs):

@@ -99,6 +99,17 @@ async def aget_deleted_objects(objs, request, admin_site):
         using = router.db_for_write(obj._meta.model)
     collector = AsyncNestedObjects(using=using, origin=objs)
     await collector.collect(objs)
+    # The format callback asks each registered admin for a per-object delete
+    # permission from sync code: compute those answers first.
+    for model, model_objs in collector.model_objs.items():
+        if not admin_site.is_registered(model):
+            continue
+        model_admin = admin_site.get_model_admin(model)
+        if hasattr(model_admin, "aprepare_permissions"):
+            for related in model_objs:
+                await model_admin.aprepare_permissions(
+                    request, related, actions=("delete",)
+                )
     perms_needed = set()
 
     def format_callback(obj):

@@ -78,6 +78,9 @@ from django.utils.translation import ngettext
 from django_async_backend.contrib.admin import widgets as async_widgets
 from django_async_backend.contrib.admin.filters import async_list_filter
 from django_async_backend.contrib.admin.log import alog_actions
+from django_async_backend.contrib.admin.permissions import (
+    AsyncPermissionsMixin,
+)
 from django_async_backend.contrib.admin.utils import (
     AsyncNestedObjects,
     PreparedPaginator,
@@ -100,7 +103,7 @@ from django_async_backend.utils.contenttypes import aget_for_model
 EMPTY_VALUE_STRING = _EMPTY
 
 
-class AsyncBaseModelAdminMixin:
+class AsyncBaseModelAdminMixin(AsyncPermissionsMixin):
     """Shared by ``AsyncModelAdmin`` and ``AsyncInlineModelAdmin``."""
 
     form = AsyncModelForm
@@ -206,13 +209,15 @@ class AsyncBaseModelAdminMixin:
             )
         return form_field
 
-    async def aprepare_for_render(self, request, obj):
+    async def aprepare_for_render(self, request, obj, readonly_fields=None):
         """Load what the templates would otherwise fetch lazily: relations
         among the readonly fields and many-to-many initial data."""
         if obj is None or obj._state.adding:
             return
+        if readonly_fields is None:
+            readonly_fields = self.get_readonly_fields(request, obj)
         names = []
-        for name in self.get_readonly_fields(request, obj):
+        for name in readonly_fields:
             try:
                 field = obj._meta.get_field(name)
             except Exception:
@@ -435,6 +440,14 @@ class AsyncModelAdmin(AsyncBaseModelAdminMixin, ModelAdmin):
         if obj is not None:
             await aget_for_model(obj.__class__)
             await aget_for_model(obj.__class__, for_concrete_model=False)
+        # Inline admins check their permissions against the parent object
+        # from sync code paths: compute them now.
+        for inline_class in self.get_inlines(request, obj if change else None):
+            inline = inline_class(self.model, self.admin_site)
+            if hasattr(inline, "aprepare_permissions"):
+                await inline.aprepare_permissions(
+                    request, obj if change else None
+                )
         formsets = []
         inline_instances = []
         prefixes = {}
@@ -690,6 +703,10 @@ class AsyncModelAdmin(AsyncBaseModelAdminMixin, ModelAdmin):
             formset = FormSet(queryset=queryset)
         await formset.aload()
         for form in formset.forms:
+            await self.aprepare_permissions(
+                request, form.instance, actions=("change",)
+            )
+        for form in formset.forms:
             if not self.has_change_permission(request, form.instance):
                 for field_name in self.list_editable:
                     form.fields.pop(field_name, None)
@@ -773,6 +790,7 @@ class AsyncModelAdmin(AsyncBaseModelAdminMixin, ModelAdmin):
             obj = None
         else:
             obj = await self.aget_object(request, unquote(object_id), to_field)
+            await self.aprepare_permissions(request, obj)
             if not self.has_view_or_change_permission(request, obj):
                 raise PermissionDenied
             if obj is None:
@@ -868,12 +886,12 @@ class AsyncModelAdmin(AsyncBaseModelAdminMixin, ModelAdmin):
         await form.aload_choices()
         for formset in formsets:
             await formset.aload()
-        await self.aprepare_for_render(request, obj)
 
         if not add and not self.has_change_permission(request, obj):
             readonly_fields = flatten_fieldsets(fieldsets)
         else:
             readonly_fields = self.get_readonly_fields(request, obj)
+        await self.aprepare_for_render(request, obj, readonly_fields)
         admin_form = helpers.AdminForm(
             form,
             list(fieldsets),
@@ -960,6 +978,7 @@ class AsyncModelAdmin(AsyncBaseModelAdminMixin, ModelAdmin):
                 "The field %s cannot be referenced." % to_field
             )
         obj = await self.aget_object(request, unquote(object_id), to_field)
+        await self.aprepare_permissions(request, obj)
         if not self.has_delete_permission(request, obj):
             raise PermissionDenied
         if obj is None:
@@ -1021,6 +1040,7 @@ class AsyncModelAdmin(AsyncBaseModelAdminMixin, ModelAdmin):
             return self._get_obj_does_not_exist_redirect(
                 request, model._meta, object_id
             )
+        await self.aprepare_permissions(request, obj)
         if not self.has_view_or_change_permission(request, obj):
             raise PermissionDenied
 
