@@ -112,7 +112,7 @@ class TestAIterator(AsyncioTestCase):
 
     async def test_aiterator_rejects_non_positive_chunk_size(self):
         for chunk_size in (0, -1):
-            with self.assertRaisesMessage(
+            with self.assertRaisesRegex(
                 ValueError, "Chunk size must be strictly positive."
             ):
                 async for _ in TestModel.async_objects.aiterator(chunk_size):
