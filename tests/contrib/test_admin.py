@@ -220,7 +220,10 @@ class AsyncAdminTests(AsyncioTransactionTestCase):
             self.assertEqual(r.status_code, 200)
             body = r.content.decode()
             for b in mine:
-                self.assertIn(b.title, body)
+                self.assertIn(
+                    "/admin/test_app/selectrelatedbookmodel/%s/change/" % b.pk,
+                    body,
+                )
             r = await self.client.post(url, {"post": "yes"})
             self.assertEqual(r.status_code, 302)
         self.assertFalse(
