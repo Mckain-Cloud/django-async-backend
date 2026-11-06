@@ -5,6 +5,7 @@ module:
     - "from django.db.models.base import ModelBase"
     - "from django.utils.functional import classproperty"
     - "from django_async_backend.db import async_connections"
+    - "from django_async_backend.db.models.constraints import avalidate_constraint"
     - "from django_async_backend.db.models.deletion import Collector"
     - "from django_async_backend.db.models.manager import AsyncManager"
     - "from django_async_backend.db.transaction import async_atomic"
@@ -417,17 +418,70 @@ module:
         clean:
           remove: true
 
+        # Validation: the pure parts (clean_fields, clean, _get_unique_checks,
+        # get_constraints, error messages) stay Django's own, the parts that
+        # query get async twins on async_objects.
         validate_unique:
-          remove: true
+          rename: async_validate_unique
+          to_async: true
+          calls:
+            - func:
+                attr: _perform_unique_checks
+                rename:
+                  attr: _async_perform_unique_checks
+              to_await: true
+            - func:
+                attr: _perform_date_checks
+                rename:
+                  attr: _async_perform_date_checks
+              to_await: true
 
         _get_unique_checks:
           remove: true
 
         _perform_unique_checks:
-          remove: true
+          rename: _async_perform_unique_checks
+          to_async: true
+          attrs:
+            - attr: _default_manager
+              rename:
+                attr: async_objects
+          calls:
+            - func:
+                attr: exists
+                rename:
+                  attr: aexists
+              to_await: true
+            - func:
+                attr: _get_pk_val
+                rename:
+                  attr: _async_get_pk_val
+            - func:
+                attr: _is_pk_set
+                rename:
+                  attr: _async_is_pk_set
 
         _perform_date_checks:
-          remove: true
+          rename: _async_perform_date_checks
+          to_async: true
+          attrs:
+            - attr: _default_manager
+              rename:
+                attr: async_objects
+          calls:
+            - func:
+                attr: exists
+                rename:
+                  attr: aexists
+              to_await: true
+            - func:
+                attr: _get_pk_val
+                rename:
+                  attr: _async_get_pk_val
+            - func:
+                attr: _is_pk_set
+                rename:
+                  attr: _async_is_pk_set
 
         date_error_message:
           remove: true
@@ -439,10 +493,31 @@ module:
           remove: true
 
         validate_constraints:
-          remove: true
+          rename: async_validate_constraints
+          to_async: true
+          calls:
+            - func:
+                value: constraint
+                attr: validate
+              replace_raw: |
+                await avalidate_constraint(
+                    constraint, model_class, self, exclude=exclude, using=using
+                )
 
         full_clean:
-          remove: true
+          rename: async_full_clean
+          to_async: true
+          calls:
+            - func:
+                attr: validate_unique
+                rename:
+                  attr: async_validate_unique
+              to_await: true
+            - func:
+                attr: validate_constraints
+                rename:
+                  attr: async_validate_constraints
+              to_await: true
 
         clean_fields:
           remove: true

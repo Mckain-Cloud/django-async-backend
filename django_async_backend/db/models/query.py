@@ -1,4 +1,6 @@
 # This file was generated automatically. Do not modify it manually. (based on django 6.1)
+from contextlib import aclosing
+
 from django_async_backend.db import async_connections
 from django_async_backend.db.models import sql as async_sql
 from django_async_backend.db.models.prefetch import (
@@ -17,10 +19,7 @@ The main QuerySet implementation. This provides the public API for the ORM.
 import copy
 import operator
 import warnings
-from contextlib import (
-    aclosing,
-    nullcontext,
-)
+from contextlib import nullcontext
 from functools import reduce
 from itertools import (
     chain,
@@ -105,8 +104,12 @@ class BaseIterable:
 
 
 class ModelIterable(BaseIterable):
-
     async def __aiter__(self):
+        async with aclosing(self._aiter_rows()) as rows:
+            async for obj in rows:
+                yield obj
+
+    async def _aiter_rows(self):
         queryset = self.queryset
         db = queryset.db
         compiler = queryset.query.get_compiler(using=db)
@@ -151,64 +154,59 @@ class ModelIterable(BaseIterable):
             for field, related_objs in queryset._known_related_objects.items()
         ]
         peers = []
-        row_iterator = compiler.results_iter(results)
-        async with aclosing(row_iterator) as rows:
-            async for row in rows:
-                obj = model_cls.from_db(
-                    db,
-                    init_list,
-                    row[model_fields_start:model_fields_end],
-                    fetch_mode=fetch_mode,
-                )
-                if fetch_mode.track_peers:
-                    peers.append(weak_ref(obj))
-                    obj._state.peers = peers
-                for rel_populator in related_populators:
-                    rel_populator.populate(row, obj)
-                if annotation_col_map:
-                    for attr_name, col_pos in annotation_col_map.items():
-                        setattr(obj, attr_name, row[col_pos])
+        async for row in compiler.results_iter(results):
+            obj = model_cls.from_db(
+                db,
+                init_list,
+                row[model_fields_start:model_fields_end],
+                fetch_mode=fetch_mode,
+            )
+            if fetch_mode.track_peers:
+                peers.append(weak_ref(obj))
+                obj._state.peers = peers
+            for rel_populator in related_populators:
+                rel_populator.populate(row, obj)
+            if annotation_col_map:
+                for attr_name, col_pos in annotation_col_map.items():
+                    setattr(obj, attr_name, row[col_pos])
 
-                # Add the known related objects to the model.
-                for (
-                    field,
-                    rel_objs,
-                    rel_attnames,
-                    rel_getter,
-                ) in known_related_objects:
-                    # Avoid overwriting objects loaded by, e.g., select_related().
-                    if field.is_cached(obj):
-                        continue
-                    # Avoid fetching potentially deferred attributes that would
-                    # result in unexpected queries.
-                    if any(
-                        attname not in obj.__dict__
-                        for attname in rel_attnames
-                    ):
-                        continue
-                    rel_obj_id = rel_getter(obj)
-                    try:
-                        rel_obj = rel_objs[rel_obj_id]
-                    except KeyError:
-                        pass  # May happen in qs1 | qs2 scenarios.
-                    else:
-                        setattr(obj, field.name, rel_obj)
+            # Add the known related objects to the model.
+            for (
+                field,
+                rel_objs,
+                rel_attnames,
+                rel_getter,
+            ) in known_related_objects:
+                # Avoid overwriting objects loaded by, e.g., select_related().
+                if field.is_cached(obj):
+                    continue
+                # Avoid fetching potentially deferred attributes that would
+                # result in unexpected queries.
+                if any(
+                    attname not in obj.__dict__ for attname in rel_attnames
+                ):
+                    continue
+                rel_obj_id = rel_getter(obj)
+                try:
+                    rel_obj = rel_objs[rel_obj_id]
+                except KeyError:
+                    pass  # May happen in qs1 | qs2 scenarios.
+                else:
+                    setattr(obj, field.name, rel_obj)
 
-                yield obj
+            yield obj
 
 
 class RawModelIterable(BaseIterable):
-
     async def __aiter__(self):
         # Cache some things for performance reasons outside the loop.
         db = self.queryset.db
         query = self.queryset.query
-        connection = connections[db]
+        connection = async_connections[db]
         compiler = connection.ops.compiler("SQLCompiler")(
             query, connection, db
         )
-        query_iterator = iter(query)
-
+        rows = await query.afetch_rows()
         try:
             (
                 model_init_names,
@@ -232,6 +230,7 @@ class RawModelIterable(BaseIterable):
                 for f in fields
             ]
             converters = compiler.get_converters(cols)
+            query_iterator = iter(rows)
             if converters:
                 query_iterator = compiler.apply_converters(
                     query_iterator, converters
@@ -259,14 +258,16 @@ class RawModelIterable(BaseIterable):
                         setattr(instance, column, values[pos])
                 yield instance
         finally:
-            # Done iterating the Query. If it has its own cursor, close it.
-            if hasattr(query, "cursor") and query.cursor:
-                query.cursor.close()
+            await query.aclose()
 
 
 class ValuesIterable(BaseIterable):
-
     async def __aiter__(self):
+        async with aclosing(self._aiter_rows()) as rows:
+            async for obj in rows:
+                yield obj
+
+    async def _aiter_rows(self):
         queryset = self.queryset
         query = queryset.query
         compiler = query.get_compiler(queryset.db)
@@ -281,34 +282,38 @@ class ValuesIterable(BaseIterable):
                 *query.annotation_select,
             ]
         indexes = range(len(names))
-        row_iterator = compiler.results_iter(
+        async for row in compiler.results_iter(
             chunked_fetch=self.chunked_fetch, chunk_size=self.chunk_size
-        )
-        async with aclosing(row_iterator) as rows:
-            async for row in rows:
-                yield {names[i]: row[i] for i in indexes}
+        ):
+            yield {names[i]: row[i] for i in indexes}
 
 
 class ValuesListIterable(BaseIterable):
-
     async def __aiter__(self):
+        async with aclosing(self._aiter_rows()) as rows:
+            async for obj in rows:
+                yield obj
+
+    async def _aiter_rows(self):
         queryset = self.queryset
         query = queryset.query
         compiler = query.get_compiler(queryset.db)
 
-        row_iterator = compiler.results_iter(
+        async for i in compiler.results_iter(
             tuple_expected=True,
             chunked_fetch=self.chunked_fetch,
             chunk_size=self.chunk_size,
-        )
-        async with aclosing(row_iterator) as rows:
-            async for i in rows:
-                yield i
+        ):
+            yield i
 
 
 class NamedValuesListIterable(ValuesListIterable):
-
     async def __aiter__(self):
+        async with aclosing(self._aiter_rows()) as rows:
+            async for obj in rows:
+                yield obj
+
+    async def _aiter_rows(self):
         queryset = self.queryset
         if queryset._fields:
             names = queryset._fields
@@ -321,21 +326,23 @@ class NamedValuesListIterable(ValuesListIterable):
             ]
         tuple_class = create_namedtuple_class(*names)
         new = tuple.__new__
-        async for row in super().__aiter__():
+        async for row in super()._aiter_rows():
             yield new(tuple_class, row)
 
 
 class FlatValuesListIterable(BaseIterable):
-
     async def __aiter__(self):
+        async with aclosing(self._aiter_rows()) as rows:
+            async for obj in rows:
+                yield obj
+
+    async def _aiter_rows(self):
         queryset = self.queryset
         compiler = queryset.query.get_compiler(queryset.db)
-        row_iterator = compiler.results_iter(
+        async for row in compiler.results_iter(
             chunked_fetch=self.chunked_fetch, chunk_size=self.chunk_size
-        )
-        async with aclosing(row_iterator) as rows:
-            async for row in rows:
-                yield row[0]
+        ):
+            yield row[0]
 
 
 class PreventQuerySetCloning:
@@ -353,6 +360,44 @@ class PreventQuerySetCloning:
 
 
 class QuerySet(AltersData):
+    async def aiterator(self, chunk_size=2000):
+        if chunk_size <= 0:
+            raise ValueError("Chunk size must be strictly positive.")
+        use_chunked_fetch = not async_connections[self.db].settings_dict.get(
+            "DISABLE_SERVER_SIDE_CURSORS"
+        )
+        iterable = self._iterable_class(
+            self, chunked_fetch=use_chunked_fetch, chunk_size=chunk_size
+        )
+        # aclosing() closes the server-side cursor as soon as the
+        # consumer stops iterating, instead of leaving it to the
+        # garbage collector.
+        async with aclosing(iterable.__aiter__()) as iterator:
+            if self._prefetch_related_lookups:
+                results = []
+                async for item in iterator:
+                    results.append(item)
+                    if len(results) >= chunk_size:
+                        await prefetch_related_objects(
+                            results, *self._prefetch_related_lookups
+                        )
+                        for result in results:
+                            yield result
+                        results.clear()
+                if results:
+                    await prefetch_related_objects(
+                        results, *self._prefetch_related_lookups
+                    )
+                    for result in results:
+                        yield result
+            else:
+                async for item in iterator:
+                    yield item
+
+    def _only(self, *fields):
+        # Kept for the async Collector, which predates public only().
+        return self.only(*fields)
+
     def __iter__(self):
         raise TypeError(
             f"{self.__class__.__name__} is not iterable synchronously. "
@@ -1233,43 +1278,6 @@ class QuerySet(AltersData):
     adelete.alters_data = True
     adelete.queryset_only = True
 
-    async def aiterator(self, chunk_size=2000):
-        """
-        An asynchronous iterator over the results from applying this QuerySet
-        to the database.
-        """
-        if chunk_size <= 0:
-            raise ValueError("Chunk size must be strictly positive.")
-        use_chunked_fetch = not connections[self.db].settings_dict.get(
-            "DISABLE_SERVER_SIDE_CURSORS"
-        )
-        iterable = self._iterable_class(
-            self, chunked_fetch=use_chunked_fetch, chunk_size=chunk_size
-        )
-        async with aclosing(iterable.__aiter__()) as iterator:
-            if self._prefetch_related_lookups:
-                results = []
-
-                async for item in iterator:
-                    results.append(item)
-                    if len(results) >= chunk_size:
-                        await aprefetch_related_objects(
-                            results, *self._prefetch_related_lookups
-                        )
-                        for result in results:
-                            yield result
-                        results.clear()
-
-                if results:
-                    await aprefetch_related_objects(
-                        results, *self._prefetch_related_lookups
-                    )
-                    for result in results:
-                        yield result
-            else:
-                async for item in iterator:
-                    yield item
-
     async def _raw_delete(self, using):
         query = self.query.clone()
         query.__class__ = async_sql.DeleteQuery
@@ -1373,6 +1381,24 @@ class QuerySet(AltersData):
         return await self.query.explain(
             using=self.db, format=format, **options
         )
+
+    ##################################################
+    # PUBLIC METHODS THAT RETURN A QUERYSET SUBCLASS #
+    ##################################################
+
+    def raw(self, raw_query, params=(), translations=None, using=None):
+        if using is None:
+            using = self.db
+        qs = RawQuerySet(
+            raw_query,
+            model=self.model,
+            params=params,
+            translations=translations,
+            using=using,
+            fetch_mode=self._fetch_mode,
+        )
+        qs._prefetch_related_lookups = self._prefetch_related_lookups[:]
+        return qs
 
     def _values(self, *fields, **expressions):
         clone = self._chain()
@@ -1790,7 +1816,20 @@ class QuerySet(AltersData):
         clone.query.standard_ordering = not clone.query.standard_ordering
         return clone
 
-    def _only(self, *fields):
+    def defer(self, *fields):
+        self._not_support_combined_queries("defer")
+        if self._fields is not None:
+            raise TypeError(
+                "Cannot call defer() after .values() or .values_list()"
+            )
+        clone = self._chain()
+        if fields == (None,):
+            clone.query.clear_deferred_loading()
+        else:
+            clone.query.add_deferred_loading(fields)
+        return clone
+
+    def only(self, *fields):
         self._not_support_combined_queries("only")
         if self._fields is not None:
             raise TypeError(
@@ -2145,6 +2184,31 @@ class EmptyQuerySet(metaclass=InstanceCheckMeta):
 
 
 class RawQuerySet:
+    def __iter__(self):
+        raise TypeError(
+            f"{self.__class__.__name__} is not iterable synchronously. "
+            "Use `async for obj in qs` or `[obj async for obj in qs]`."
+        )
+
+    def __len__(self):
+        raise TypeError(
+            f"len() is not supported on {self.__class__.__name__}. "
+            "Use `[obj async for obj in qs]` and len() the list."
+        )
+
+    def __bool__(self):
+        raise TypeError(
+            f"bool() is not supported on {self.__class__.__name__}."
+        )
+
+    async def __aiter__(self):
+        await self._fetch_all()
+        for obj in self._result_cache:
+            yield obj
+
+    async def aiterator(self):
+        async for obj in RawModelIterable(self):
+            yield obj
 
     def __init__(
         self,
@@ -2161,7 +2225,7 @@ class RawQuerySet:
         self.model = model
         self._db = using
         self._hints = hints or {}
-        self.query = query or sql.RawQuery(
+        self.query = query or async_sql.RawQuery(
             sql=raw_query, using=self.db, params=params
         )
         self.params = params
@@ -2199,8 +2263,8 @@ class RawQuerySet:
             )
         return clone
 
-    def _prefetch_related_objects(self):
-        prefetch_related_objects(
+    async def _prefetch_related_objects(self):
+        await prefetch_related_objects(
             self._result_cache, *self._prefetch_related_lookups
         )
         self._prefetch_done = True
@@ -2218,42 +2282,14 @@ class RawQuerySet:
         c._prefetch_related_lookups = self._prefetch_related_lookups[:]
         return c
 
-    def _fetch_all(self):
+    async def _fetch_all(self):
         if self._result_cache is None:
-            self._result_cache = list(self.iterator())
+            self._result_cache = [obj async for obj in RawModelIterable(self)]
         if self._prefetch_related_lookups and not self._prefetch_done:
-            self._prefetch_related_objects()
-
-    def __len__(self):
-        self._fetch_all()
-        return len(self._result_cache)
-
-    def __bool__(self):
-        self._fetch_all()
-        return bool(self._result_cache)
-
-    def __iter__(self):
-        self._fetch_all()
-        return iter(self._result_cache)
-
-    def __aiter__(self):
-        # Remember, __aiter__ itself is synchronous, it's the thing it returns
-        # that is async!
-        async def generator():
-            await sync_to_async(self._fetch_all)()
-            for item in self._result_cache:
-                yield item
-
-        return generator()
-
-    def iterator(self):
-        yield from RawModelIterable(self)
+            await self._prefetch_related_objects()
 
     def __repr__(self):
         return "<%s: %s>" % (self.__class__.__name__, self.query)
-
-    def __getitem__(self, k):
-        return list(self)[k]
 
     @property
     def db(self):

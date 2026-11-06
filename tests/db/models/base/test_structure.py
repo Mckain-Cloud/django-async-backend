@@ -13,9 +13,24 @@ PUBLIC_API = {
     "async_save",
     "async_delete",
     "async_refresh_from_db",
+    "async_full_clean",
+    "async_validate_unique",
+    "async_validate_constraints",
 }
 
-EXEMPT = {"_meta", "_state", "NotUpdated"}
+# Attributes the mixin may use from the host Model: state, plus the pure
+# (query-free) validation helpers that async_full_clean() reuses as-is.
+EXEMPT = {
+    "_meta",
+    "_state",
+    "NotUpdated",
+    "clean",
+    "clean_fields",
+    "get_constraints",
+    "_get_unique_checks",
+    "date_error_message",
+    "unique_error_message",
+}
 
 
 def _methods(body):

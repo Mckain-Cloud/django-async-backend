@@ -73,6 +73,7 @@ from django.utils.text import (
 from django.utils.translation import gettext_lazy as _
 
 from django_async_backend.db import async_connections
+from django_async_backend.db.models.constraints import avalidate_constraint
 from django_async_backend.db.models.deletion import Collector
 from django_async_backend.db.models.manager import AsyncManager
 from django_async_backend.db.transaction import (
@@ -626,3 +627,167 @@ class AsyncModelMixin:
         return await collector.delete()
 
     async_delete.alters_data = True
+
+    async def async_validate_unique(self, exclude=None):
+        unique_checks, date_checks = self._get_unique_checks(exclude=exclude)
+
+        errors = await self._async_perform_unique_checks(unique_checks)
+        date_errors = await self._async_perform_date_checks(date_checks)
+
+        for k, v in date_errors.items():
+            errors.setdefault(k, []).extend(v)
+
+        if errors:
+            raise ValidationError(errors)
+
+    async def _async_perform_unique_checks(self, unique_checks):
+        errors = {}
+
+        for model_class, unique_check in unique_checks:
+            # Try to look up an existing object with the same values as this
+            # object's values for all the unique field.
+
+            lookup_kwargs = {}
+            for field_name in unique_check:
+                f = self._meta.get_field(field_name)
+                lookup_value = getattr(self, f.attname)
+                # TODO: Handle multiple backends with different feature flags.
+                if lookup_value is None or (
+                    lookup_value == ""
+                    and connection.features.interprets_empty_strings_as_nulls
+                ):
+                    # no value, skip the lookup
+                    continue
+                if f in model_class._meta.pk_fields and not self._state.adding:
+                    # no need to check for unique primary key when editing
+                    continue
+                lookup_kwargs[str(field_name)] = lookup_value
+
+            # some fields were skipped, no reason to do the check
+            if len(unique_check) != len(lookup_kwargs):
+                continue
+
+            qs = model_class.async_objects.filter(**lookup_kwargs)
+
+            # Exclude the current object from the query if we are editing an
+            # instance (as opposed to creating a new one)
+            # Note that we need to use the pk as defined by model_class, not
+            # self.pk. These can be different fields because model inheritance
+            # allows single model to have effectively multiple primary keys.
+            # Refs #17615.
+            model_class_pk = self._async_get_pk_val(model_class._meta)
+            if not self._state.adding and self._async_is_pk_set(
+                model_class._meta
+            ):
+                qs = qs.exclude(pk=model_class_pk)
+            if await qs.aexists():
+                if len(unique_check) == 1:
+                    key = unique_check[0]
+                else:
+                    key = NON_FIELD_ERRORS
+                errors.setdefault(key, []).append(
+                    self.unique_error_message(model_class, unique_check)
+                )
+
+        return errors
+
+    async def _async_perform_date_checks(self, date_checks):
+        errors = {}
+        for model_class, lookup_type, field, unique_for in date_checks:
+            lookup_kwargs = {}
+            # there's a ticket to add a date lookup, we can remove this special
+            # case if that makes its way in
+            date = getattr(self, unique_for)
+            if date is None:
+                continue
+            if lookup_type == "date":
+                lookup_kwargs["%s__day" % unique_for] = date.day
+                lookup_kwargs["%s__month" % unique_for] = date.month
+                lookup_kwargs["%s__year" % unique_for] = date.year
+            else:
+                lookup_kwargs["%s__%s" % (unique_for, lookup_type)] = getattr(
+                    date, lookup_type
+                )
+            lookup_kwargs[field] = getattr(self, field)
+
+            qs = model_class.async_objects.filter(**lookup_kwargs)
+            # Exclude the current object from the query if we are editing an
+            # instance (as opposed to creating a new one)
+            if not self._state.adding and self._async_is_pk_set():
+                qs = qs.exclude(pk=self.pk)
+
+            if await qs.aexists():
+                errors.setdefault(field, []).append(
+                    self.date_error_message(lookup_type, field, unique_for)
+                )
+        return errors
+
+    async def async_validate_constraints(self, exclude=None):
+        constraints = self.get_constraints()
+        using = router.db_for_write(self.__class__, instance=self)
+
+        errors = {}
+        for model_class, model_constraints in constraints:
+            for constraint in model_constraints:
+                try:
+                    await avalidate_constraint(
+                        constraint,
+                        model_class,
+                        self,
+                        exclude=exclude,
+                        using=using,
+                    )
+                except ValidationError as e:
+                    if (
+                        getattr(e, "code", None) == "unique"
+                        and len(constraint.fields) == 1
+                    ):
+                        errors.setdefault(constraint.fields[0], []).append(e)
+                    else:
+                        errors = e.update_error_dict(errors)
+        if errors:
+            raise ValidationError(errors)
+
+    async def async_full_clean(
+        self, exclude=None, validate_unique=True, validate_constraints=True
+    ):
+        errors = {}
+        if exclude is None:
+            exclude = set()
+        else:
+            exclude = set(exclude)
+
+        try:
+            self.clean_fields(exclude=exclude)
+        except ValidationError as e:
+            errors = e.update_error_dict(errors)
+
+        # Form.clean() is run even if other validation fails, so do the
+        # same with Model.clean() for consistency.
+        try:
+            self.clean()
+        except ValidationError as e:
+            errors = e.update_error_dict(errors)
+
+        # Run unique checks, but only for fields that passed validation.
+        if validate_unique:
+            for name in errors:
+                if name != NON_FIELD_ERRORS and name not in exclude:
+                    exclude.add(name)
+            try:
+                await self.async_validate_unique(exclude=exclude)
+            except ValidationError as e:
+                errors = e.update_error_dict(errors)
+
+        # Run constraints checks, but only for fields that passed validation.
+        if validate_constraints:
+            for name in errors:
+                if name != NON_FIELD_ERRORS and name not in exclude:
+                    exclude.add(name)
+            try:
+                await self.async_validate_constraints(exclude=exclude)
+            except ValidationError as e:
+                errors = e.update_error_dict(errors)
+
+        if errors:
+            raise ValidationError(errors)

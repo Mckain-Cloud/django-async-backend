@@ -77,7 +77,9 @@ class SQLCompiler:
     ):
         if results is None:
             results = await self.execute_sql(
-                MULTI, chunked_fetch=chunked_fetch, chunk_size=chunk_size
+                MULTI,
+                chunked_fetch=chunked_fetch,
+                chunk_size=chunk_size,
             )
         fields = [s[0] for s in self.select[0 : self.col_count]]
         converters = self.get_converters(fields)
@@ -93,10 +95,12 @@ class SQLCompiler:
                 yield row
 
         if hasattr(results, "__aiter__"):
-            async with aclosing(results) as chunks:
-                async for chunk in chunks:
+            try:
+                async for chunk in results:
                     async for row in yield_rows(chunk):
                         yield row
+            finally:
+                await results.aclose()
         else:
             async for row in yield_rows(chain.from_iterable(results)):
                 yield row

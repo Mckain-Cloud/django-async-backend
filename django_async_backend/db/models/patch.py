@@ -10,6 +10,8 @@ third-party models.
 from django.db.models.base import Model
 
 from django_async_backend.db.models.base import AsyncModelMixin
+from django_async_backend.db.models.fetch import afetch
+from django_async_backend.db.models.related import patch_related_managers
 
 _ORIGINAL_MODEL_ATTRS = frozenset(dir(Model))
 _ASYNC_MIXIN_MEMBERS = {
@@ -17,6 +19,8 @@ _ASYNC_MIXIN_MEMBERS = {
     for name, value in vars(AsyncModelMixin).items()
     if not name.startswith("__")
 }
+# Hand-written additions that are not part of the generated mixin.
+_ASYNC_MIXIN_MEMBERS["afetch"] = afetch
 
 _patched = False
 
@@ -27,4 +31,7 @@ def _patch_model():
         return
     for name, value in _ASYNC_MIXIN_MEMBERS.items():
         setattr(Model, name, value)
+        if name not in vars(AsyncModelMixin):
+            setattr(AsyncModelMixin, name, value)
+    patch_related_managers()
     _patched = True

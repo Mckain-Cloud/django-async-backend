@@ -2,6 +2,7 @@ pathname: db/models/query.py
 
 module:
   new_imports:
+    - "from contextlib import aclosing"
     - "from django_async_backend.db import async_connections"
     - "from django_async_backend.db.models import sql as async_sql"
     - "from django_async_backend.db.transaction import async_atomic"
@@ -64,6 +65,49 @@ module:
 
     QuerySet:
       add_raw_top:
+        - |
+          async def aiterator(self, chunk_size=2000):
+              """
+              An asynchronous iterator over the results from applying this
+              QuerySet to the database, streamed through a server-side cursor
+              when the backend allows it.
+              """
+              if chunk_size <= 0:
+                  raise ValueError("Chunk size must be strictly positive.")
+              use_chunked_fetch = not async_connections[
+                  self.db
+              ].settings_dict.get("DISABLE_SERVER_SIDE_CURSORS")
+              iterable = self._iterable_class(
+                  self, chunked_fetch=use_chunked_fetch, chunk_size=chunk_size
+              )
+              # aclosing() closes the server-side cursor as soon as the
+              # consumer stops iterating, instead of leaving it to the
+              # garbage collector.
+              async with aclosing(iterable.__aiter__()) as iterator:
+                  if self._prefetch_related_lookups:
+                      results = []
+                      async for item in iterator:
+                          results.append(item)
+                          if len(results) >= chunk_size:
+                              await prefetch_related_objects(
+                                  results, *self._prefetch_related_lookups
+                              )
+                              for result in results:
+                                  yield result
+                              results.clear()
+                      if results:
+                          await prefetch_related_objects(
+                              results, *self._prefetch_related_lookups
+                          )
+                          for result in results:
+                              yield result
+                  else:
+                      async for item in iterator:
+                          yield item
+        - |
+          def _only(self, *fields):
+              # Kept for the async Collector, which predates public only().
+              return self.only(*fields)
         - |
           def __iter__(self):
               raise TypeError(
@@ -209,6 +253,10 @@ module:
         _iterator:
           remove: True
 
+        # Replaced by the raw aiterator() above (needs aclosing()).
+        aiterator:
+          remove: True
+
         aget:
           remove: true
 
@@ -251,10 +299,9 @@ module:
         alatest:
           remove: true
 
+        # raw() is kept: it returns the async RawQuerySet below. araw() is
+        # Django's thread-hop wrapper and is dropped.
         araw:
-          remove: true
-
-        raw:
           remove: true
 
         ain_bulk:
@@ -305,19 +352,12 @@ module:
                       f"Use Model.async_objects instead of Model.objects."
                   )
 
-        # only() is generated as a private _only(): the method itself is pure
-        # sync, but the instances it returns carry deferred fields, and
-        # Django's DeferredAttribute.__get__ falls back to the *sync*
-        # Model.refresh_from_db, which we do not replace, so reading one raises
-        # SynchronousOnlyOperation. The async Collector only ever reads the FK
-        # columns it asked for; users would not, hence no public only().
-        # The leading underscore also keeps it off AsyncManager, since
-        # BaseManager.from_queryset() skips private methods.
-        only:
-          rename: _only
-
-        defer:
-          remove: true
+        # only()/defer() are kept public. Instances they return carry
+        # deferred fields; reading one in async code still raises
+        # SynchronousOnlyOperation (Django's DeferredAttribute falls back to
+        # the sync refresh_from_db), so load them explicitly with
+        # ``await instance.afetch("field")``. The async Collector uses the
+        # private _only() alias defined in add_raw_top.
 
         explain:
           to_async: true
@@ -696,10 +736,20 @@ module:
         __aiter__:
           remove: true
 
+    # Each iterable's generated __iter__ becomes _aiter_rows(); the public
+    # __aiter__ wraps it in aclosing() so that a consumer breaking out of
+    # the loop closes the compiler's row generator (and with it the
+    # server-side cursor) right away rather than at garbage collection.
     ModelIterable:
+      add_raw_top:
+        - |
+          async def __aiter__(self):
+              async with aclosing(self._aiter_rows()) as rows:
+                  async for obj in rows:
+                      yield obj
       methods:
         __iter__:
-          rename: __aiter__
+          rename: _aiter_rows
           to_async: true
           for_statements:
             - target: row
@@ -712,15 +762,83 @@ module:
               to_await: true
 
     RawModelIterable:
+      add_raw_top:
+        - |
+          async def __aiter__(self):
+              # Cache some things for performance reasons outside the loop.
+              db = self.queryset.db
+              query = self.queryset.query
+              connection = async_connections[db]
+              compiler = connection.ops.compiler("SQLCompiler")(
+                  query, connection, db
+              )
+              rows = await query.afetch_rows()
+              try:
+                  (
+                      model_init_names,
+                      model_init_pos,
+                      annotation_fields,
+                  ) = self.queryset.resolve_model_init_order()
+                  model_cls = self.queryset.model
+                  if any(
+                      f.attname not in model_init_names
+                      for f in model_cls._meta.pk_fields
+                  ):
+                      raise exceptions.FieldDoesNotExist(
+                          "Raw query must include the primary key"
+                      )
+                  fields = [
+                      self.queryset.model_fields.get(c)
+                      for c in self.queryset.columns
+                  ]
+                  cols = [
+                      f.get_col(f.model._meta.db_table) if f else None
+                      for f in fields
+                  ]
+                  converters = compiler.get_converters(cols)
+                  query_iterator = iter(rows)
+                  if converters:
+                      query_iterator = compiler.apply_converters(
+                          query_iterator, converters
+                      )
+                  if compiler.has_composite_fields(cols):
+                      query_iterator = compiler.composite_fields_to_tuples(
+                          query_iterator, cols
+                      )
+                  fetch_mode = self.queryset._fetch_mode
+                  peers = []
+                  for values in query_iterator:
+                      # Associate fields to values
+                      model_init_values = [values[pos] for pos in model_init_pos]
+                      instance = model_cls.from_db(
+                          db,
+                          model_init_names,
+                          model_init_values,
+                          fetch_mode=fetch_mode,
+                      )
+                      if fetch_mode.track_peers:
+                          peers.append(weak_ref(instance))
+                          instance._state.peers = peers
+                      if annotation_fields:
+                          for column, pos in annotation_fields:
+                              setattr(instance, column, values[pos])
+                      yield instance
+              finally:
+                  await query.aclose()
       methods:
         __iter__:
-          rename: __aiter__
-          to_async: true
+          remove: true
 
     ValuesIterable:
+      add_raw_top:
+        - |
+          async def __aiter__(self):
+              async with aclosing(self._aiter_rows()) as rows:
+                  async for obj in rows:
+                      yield obj
       methods:
         __iter__:
-          rename: __aiter__
+          rename: _aiter_rows
           to_async: true
           for_statements:
             - target: row
@@ -730,9 +848,15 @@ module:
                 attr: results_iter
 
     ValuesListIterable:
+      add_raw_top:
+        - |
+          async def __aiter__(self):
+              async with aclosing(self._aiter_rows()) as rows:
+                  async for obj in rows:
+                      yield obj
       methods:
         __iter__:
-          rename: __aiter__
+          rename: _aiter_rows
           to_async: true
           return_blocks:
             - remove: true
@@ -746,9 +870,15 @@ module:
                     yield i
 
     NamedValuesListIterable:
+      add_raw_top:
+        - |
+          async def __aiter__(self):
+              async with aclosing(self._aiter_rows()) as rows:
+                  async for obj in rows:
+                      yield obj
       methods:
         __iter__:
-          rename: __aiter__
+          rename: _aiter_rows
           to_async: true
           for_statements:
             - target: row
@@ -757,12 +887,18 @@ module:
             - func:
                 attr: __iter__
                 rename:
-                  attr: __aiter__
+                  attr: _aiter_rows
 
     FlatValuesListIterable:
+      add_raw_top:
+        - |
+          async def __aiter__(self):
+              async with aclosing(self._aiter_rows()) as rows:
+                  async for obj in rows:
+                      yield obj
       methods:
         __iter__:
-          rename: __aiter__
+          rename: _aiter_rows
           to_async: true
           for_statements:
             - target: row
@@ -770,3 +906,76 @@ module:
           calls:
             - func:
                 attr: results_iter
+
+    # RawQuerySet is async-only, like QuerySet: sync iteration and len()
+    # raise, ``async for`` evaluates (and caches), aiterator() streams.
+    RawQuerySet:
+      add_raw_top:
+        - |
+          def __iter__(self):
+              raise TypeError(
+                  f"{self.__class__.__name__} is not iterable synchronously. "
+                  "Use `async for obj in qs` or `[obj async for obj in qs]`."
+              )
+        - |
+          def __len__(self):
+              raise TypeError(
+                  f"len() is not supported on {self.__class__.__name__}. "
+                  "Use `[obj async for obj in qs]` and len() the list."
+              )
+        - |
+          def __bool__(self):
+              raise TypeError(
+                  f"bool() is not supported on {self.__class__.__name__}."
+              )
+        - |
+          async def __aiter__(self):
+              await self._fetch_all()
+              for obj in self._result_cache:
+                  yield obj
+        - |
+          async def aiterator(self):
+              async for obj in RawModelIterable(self):
+                  yield obj
+      methods:
+        __init__:
+          calls:
+            - func:
+                attr: RawQuery
+                rename:
+                  value: async_sql
+
+        __iter__:
+          remove: true
+
+        __len__:
+          remove: true
+
+        __bool__:
+          remove: true
+
+        __aiter__:
+          remove: true
+
+        __getitem__:
+          remove: true
+
+        iterator:
+          remove: true
+
+        _fetch_all:
+          to_async: true
+          calls:
+            - func:
+                name: list
+              replace_raw: "[obj async for obj in RawModelIterable(self)]"
+            - func:
+                attr: _prefetch_related_objects
+              to_await: true
+
+        _prefetch_related_objects:
+          to_async: true
+          calls:
+            - func:
+                name: prefetch_related_objects
+              to_await: true

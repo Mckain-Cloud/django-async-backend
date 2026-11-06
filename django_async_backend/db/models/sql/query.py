@@ -196,6 +196,24 @@ JoinInfo = namedtuple(
 
 
 class RawQuery:
+    async def afetch_rows(self):
+        await self._execute_query()
+        return await self.cursor.fetchall()
+
+    async def aclose(self):
+        if self.cursor is not None:
+            await self.cursor.close()
+
+    def get_columns(self):
+        # Only valid once afetch_rows() has executed the query; the
+        # async wrapper has no introspection, and PostgreSQL's
+        # identifier converter is the identity anyway.
+        if self.cursor is None:
+            raise TypeError(
+                "The raw query has not been executed yet; iterate the "
+                "RawQuerySet with `async for` first."
+            )
+        return [column_meta[0] for column_meta in self.cursor.description]
 
     def __init__(self, sql, using, params=()):
         self.params = params
@@ -215,27 +233,6 @@ class RawQuery:
     def clone(self, using):
         return RawQuery(self.sql, using, params=self.params)
 
-    def get_columns(self):
-        if self.cursor is None:
-            self._execute_query()
-        converter = connections[self.using].introspection.identifier_converter
-        return [
-            converter(column_meta[0])
-            for column_meta in self.cursor.description
-        ]
-
-    def __iter__(self):
-        # Always execute a new query for a new iterator.
-        # This could be optimized with a cache at the expense of RAM.
-        self._execute_query()
-        if not connections[self.using].features.can_use_chunked_reads:
-            # If the database can't use chunked reads we need to make sure we
-            # evaluate the entire query up front.
-            result = list(self.cursor)
-        else:
-            result = self.cursor
-        return iter(result)
-
     def __repr__(self):
         return "<%s: %s>" % (self.__class__.__name__, self)
 
@@ -250,7 +247,7 @@ class RawQuery:
             return self.sql
         return self.sql % self.params_type(self.params)
 
-    def _execute_query(self):
+    async def _execute_query(self):
         connection = connections[self.using]
 
         # Adapt parameters to the database, as much as possible considering
@@ -266,8 +263,8 @@ class RawQuery:
         else:
             raise RuntimeError("Unexpected params type: %s" % params_type)
 
-        self.cursor = connection.cursor()
-        self.cursor.execute(self.sql, params)
+        self.cursor = await connection.cursor()
+        await self.cursor.execute(self.sql, params)
 
 
 ExplainInfo = namedtuple("ExplainInfo", ("format", "options"))

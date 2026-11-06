@@ -475,7 +475,12 @@ def apply_for_statements(original_node, updated_node, for_statements):
         else:
             matcher = m.For()
         if m.matches(original_node, matcher):
-            updated_node = updated_node.visit(for_transformer(for_config))
+            # Change only the matched loop itself. Visiting the subtree
+            # would also turn every nested ``for`` into ``async for``.
+            if for_config.to_async:
+                updated_node = updated_node.with_changes(
+                    asynchronous=cst.Asynchronous()
+                )
             break
     return updated_node
 

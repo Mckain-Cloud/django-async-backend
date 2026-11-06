@@ -12,6 +12,48 @@ module:
       remove: true
 
   classes:
+    # Async RawQuery: the query is executed by afetch_rows() from the async
+    # RawModelIterable, which reads the description for get_columns() while
+    # the cursor is open and then closes it with aclose().
+    RawQuery:
+      add_raw_top:
+        - |
+          async def afetch_rows(self):
+              await self._execute_query()
+              return await self.cursor.fetchall()
+        - |
+          async def aclose(self):
+              if self.cursor is not None:
+                  await self.cursor.close()
+        - |
+          def get_columns(self):
+              # Only valid once afetch_rows() has executed the query; the
+              # async wrapper has no introspection, and PostgreSQL's
+              # identifier converter is the identity anyway.
+              if self.cursor is None:
+                  raise TypeError(
+                      "The raw query has not been executed yet; iterate the "
+                      "RawQuerySet with `async for` first."
+                  )
+              return [column_meta[0] for column_meta in self.cursor.description]
+      methods:
+        __iter__:
+          remove: true
+
+        get_columns:
+          remove: true
+
+        _execute_query:
+          to_async: true
+          calls:
+            - func:
+                value: connection
+                attr: cursor
+              to_await: true
+            - func:
+                attr: execute
+              to_await: true
+
     Query:
       methods:
         get_aggregation:

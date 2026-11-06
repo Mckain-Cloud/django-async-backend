@@ -413,6 +413,15 @@ async def _get_prefetch_querysets(prefetcher, instances, querysets):
         if type(prefetcher).__module__ == CONTENTTYPES_MODULE:
             return await _generic_relation(prefetcher, instances, querysets)
 
+    # Custom descriptors and managers opt in by implementing an async twin
+    # of Django's hook. It must return the same six-tuple, with an *async*
+    # queryset (or async iterable) in the first slot, and must not evaluate
+    # it. Discovery still goes through Django's get_prefetcher(), so the
+    # sync ``get_prefetch_querysets`` and ``is_cached`` must exist too.
+    hook = getattr(prefetcher, "aget_prefetch_querysets", None)
+    if hook is not None:
+        return (*await hook(instances, querysets), _noop)
+
     return _unsupported(prefetcher)
 
 
