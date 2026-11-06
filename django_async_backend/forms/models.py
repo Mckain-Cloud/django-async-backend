@@ -43,6 +43,8 @@ from django.forms.models import (
     modelformset_factory,
 )
 
+from django_async_backend.db.models.convert import to_async_queryset
+
 # --------------------------------------------------------------- fields ----
 
 
@@ -88,6 +90,19 @@ class AsyncModelChoiceField(ModelChoiceField):
     """
 
     iterator = AsyncModelChoiceIterator
+
+    def _get_queryset(self):
+        return self._queryset
+
+    def _set_queryset(self, queryset):
+        # A sync queryset from user code (e.g. a formfield_for_* override)
+        # would be iterated on a worker thread; run it natively instead.
+        if queryset is not None:
+            queryset = to_async_queryset(queryset).all()
+        self._queryset = queryset
+        self.widget.choices = self.choices
+
+    queryset = property(_get_queryset, _set_queryset)
 
     async def aload_choices(self):
         if self.queryset is None:
@@ -330,22 +345,29 @@ class AsyncModelForm(ModelForm):
             )
         except ValidationError as e:
             self._update_errors(e)
+        # Field cleaning: no queries, except that ForeignKey.validate()
+        # checks the target row exists. The async choice field has done that
+        # already, so skip relation fields.
+        relation_names = {
+            f.name
+            for f in self.instance._meta.fields
+            if f.is_relation and (f.many_to_one or f.one_to_one)
+        }
+        errors = {}
         try:
-            # Field cleaning and Model.clean(): no queries, except that
-            # ForeignKey.validate() checks the target row exists. The async
-            # choice field has done that already, so skip relation fields.
-            relation_names = {
-                f.name
-                for f in self.instance._meta.fields
-                if f.is_relation and (f.many_to_one or f.one_to_one)
-            }
-            self.instance.full_clean(
-                exclude=exclude | relation_names,
-                validate_unique=False,
-                validate_constraints=False,
-            )
+            self.instance.clean_fields(exclude=exclude | relation_names)
         except ValidationError as e:
-            self._update_errors(e)
+            errors = e.update_error_dict(errors)
+        # Model.aclean() if the model defines it (it may query), else clean().
+        try:
+            if hasattr(self.instance, "aclean"):
+                await self.instance.aclean()
+            else:
+                self.instance.clean()
+        except ValidationError as e:
+            errors = e.update_error_dict(errors)
+        if errors:
+            self._update_errors(ValidationError(errors))
         if self._validate_unique:
             await self.avalidate_unique()
         if self._validate_constraints:
@@ -430,7 +452,7 @@ class AsyncBaseModelFormSet(BaseModelFormSet):
     def get_queryset(self):
         if not hasattr(self, "_queryset"):
             if self.queryset is not None:
-                qs = self.queryset
+                qs = to_async_queryset(self.queryset)
             else:
                 qs = self.model.async_objects.get_queryset()
             if isinstance(qs, list):

@@ -331,6 +331,29 @@ asynchronously. The admin renders every page this way. Set
 `ASYNC_BACKEND_ASYNC_TEMPLATES = False` to leave `FilterExpression.resolve`
 unpatched (then only `arender*` on templates without custom tags works).
 
+### Sync inputs, hooks and caveats
+
+- A sync `Model.objects` queryset handed to an async form field, formset,
+  the changelist (`get_queryset()` overrides) or a template is converted
+  with `to_async_queryset()` and runs natively, instead of through Django's
+  thread-backed `QuerySet.__aiter__`.
+- `Model.aclean()` is awaited by `async_full_clean()` and the async forms
+  (`clean()` must not query). `list_display` entries may be `async def`
+  methods on the `ModelAdmin` or the model. Custom list filters implement
+  `alookups()`. Third-party template nodes define `async def arender()`.
+- The async `Query` subclasses Django's, so `filter(fk__in=async_qs)` is
+  narrowed to the primary key like a sync subquery.
+- `ExclusionConstraint` is validated asynchronously alongside unique and
+  check constraints.
+- Password hashing in the admin's password-change form runs in a worker
+  thread (CPU, no query).
+- The admin renders in the view, so `process_template_response` middleware
+  sees a rendered response; set `ASYNC_BACKEND_ADMIN_RENDER_IN_VIEW = False`
+  to let Django render it (sync engine, worker thread) after those hooks.
+- Object-level permission backends are still called through Django's sync
+  `has_perm()`; a backend that queries per object raises
+  `SynchronousOnlyOperation` in the admin.
+
 ### Custom descriptors
 
 A custom descriptor or manager takes part in `prefetch_related()` by

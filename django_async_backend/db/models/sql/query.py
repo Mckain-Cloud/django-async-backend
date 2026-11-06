@@ -1,4 +1,6 @@
 # This file was generated automatically. Do not modify it manually. (based on django 6.1)
+from django.db.models.sql.query import Query as DjangoQuery
+
 from django_async_backend.db import async_connections as connections
 
 """
@@ -270,7 +272,7 @@ class RawQuery:
 ExplainInfo = namedtuple("ExplainInfo", ("format", "options"))
 
 
-class Query(BaseExpression):
+class Query(DjangoQuery):
 
     alias_prefix = "T"
     empty_result_set_value = None
@@ -472,7 +474,9 @@ class Query(BaseExpression):
 
     async def get_aggregation(self, using, aggregate_exprs):
 
-        from django_async_backend.db.models.sql.subqueries import AggregateQuery
+        from django_async_backend.db.models.sql.subqueries import (
+            AggregateQuery,
+        )
 
         if not aggregate_exprs:
             return {}

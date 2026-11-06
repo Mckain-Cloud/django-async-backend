@@ -63,6 +63,10 @@ from django.utils.translation import (
     pgettext_lazy,
 )
 
+from django_async_backend.db.models.convert import (
+    is_sync_queryset,
+    to_async_queryset,
+)
 from django_async_backend.db.models.query import QuerySet as AsyncQuerySet
 
 PRERESOLVED_KEY = "__async_template_preresolved"
@@ -138,6 +142,9 @@ def _adapt(current):
         async_objects = getattr(current, "async_objects", None)
         if async_objects is not None:
             return async_objects
+    if is_sync_queryset(current):
+        # Django's own __aiter__ would run it on a worker thread.
+        return to_async_queryset(current)
     return current
 
 
@@ -337,6 +344,10 @@ async def arender_annotated(node, context):
 
 
 async def arender_node(node, context):
+    # Third-party nodes opt in by defining ``async def arender(context)``.
+    arender = getattr(node, "arender", None)
+    if arender is not None and inspect.iscoroutinefunction(arender):
+        return await arender(context)
     for klass, renderer in _RENDERERS:
         if isinstance(node, klass):
             return await renderer(node, context)

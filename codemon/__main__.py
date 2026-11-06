@@ -493,6 +493,7 @@ def function_transformer(name: str, config: Function) -> cst.CSTTransformer:
 
     class FunctionTransformed(m.MatcherDecoratableTransformer):
         if config.for_statements:
+
             @m.leave(m.For())
             def for_statement(
                 self, original_node: cst.For, updated_node: cst.For
@@ -512,6 +513,7 @@ def function_transformer(name: str, config: Function) -> cst.CSTTransformer:
                 )
 
         if config.return_blocks:
+
             @m.leave(m.Return())
             def return_block(
                 self, original_node: cst.Return, updated_node: cst.Return
@@ -831,6 +833,19 @@ def class_transformer(name: str, config: Class) -> cst.CSTTransformer:
                     keywords=[],
                     lpar=cst.MaybeSentinel.DEFAULT,
                     rpar=cst.MaybeSentinel.DEFAULT,
+                )
+
+        if config.bases:
+
+            @m.leave(m.ClassDef())
+            def set_bases(
+                self, original_node: cst.ClassDef, updated_node: cst.ClassDef
+            ) -> cst.ClassDef:
+                return updated_node.with_changes(
+                    bases=[cst.Arg(cst.Name(base)) for base in config.bases],
+                    keywords=[],
+                    lpar=cst.LeftParen(),
+                    rpar=cst.RightParen(),
                 )
 
         if config.add_raw_top:

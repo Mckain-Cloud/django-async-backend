@@ -72,6 +72,12 @@ module:
       clear_bases: true
       add_raw_top:
         - |
+          async def _async_clean(self):
+              # Model.aclean() may query; Model.clean() must not.
+              if hasattr(self, "aclean"):
+                  return await self.aclean()
+              return self.clean()
+        - |
           @classproperty
           def async_objects(cls):
               manager = cls.__dict__.get("_async_objects_cache")
@@ -508,6 +514,10 @@ module:
           rename: async_full_clean
           to_async: true
           calls:
+            # Model.aclean() when the model defines one (it may query).
+            - func:
+                attr: clean
+              replace_raw: "await self._async_clean()"
             - func:
                 attr: validate_unique
                 rename:

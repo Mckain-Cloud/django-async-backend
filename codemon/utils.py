@@ -107,6 +107,9 @@ class Class(BaseModel):
     remove: bool = False
     rename: str | None = None
     clear_bases: bool = False
+    # Replace the base classes with these names (which must be importable in
+    # the generated module, e.g. via ``new_imports``).
+    bases: list[str] | None = None
     add_raw_top: list[str] | None = None
     methods: dict[str, Method] = {}
     assigns: list[Assign] | None = None

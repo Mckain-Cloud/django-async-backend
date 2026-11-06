@@ -24,6 +24,7 @@ EXEMPT = {
     "_meta",
     "_state",
     "NotUpdated",
+    "aclean",
     "clean",
     "clean_fields",
     "get_constraints",

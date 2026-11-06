@@ -52,11 +52,21 @@ class AsyncAdminAuthenticationForm(AdminAuthenticationForm):
 
 
 class AsyncAdminPasswordChangeForm(AdminPasswordChangeForm):
-    """Validation is pure (hashing); only the save is a query."""
+    """Validation and hashing are CPU work (no queries) and run in a worker
+    thread so they do not stall the event loop; only the save is a query."""
+
+    async def ais_valid(self):
+        from asgiref.sync import sync_to_async
+
+        return await sync_to_async(self.is_valid, thread_sensitive=False)()
 
     async def asave(self, commit=True):
+        from asgiref.sync import sync_to_async
+
         password = self.cleaned_data["new_password1"]
-        self.user.set_password(password)
+        await sync_to_async(self.user.set_password, thread_sensitive=False)(
+            password
+        )
         if commit:
             await self.user.async_save(update_fields=["password"])
         return self.user

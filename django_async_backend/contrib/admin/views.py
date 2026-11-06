@@ -1,5 +1,8 @@
 """Changelist and autocomplete views on the async ORM."""
 
+import functools
+import inspect
+
 from django.contrib.admin.views.autocomplete import AutocompleteJsonView
 from django.contrib.admin.views.main import (
     ChangeList,
@@ -13,6 +16,7 @@ from django.core.paginator import (
 from django.http import JsonResponse
 
 from django_async_backend.contrib.admin.utils import PreparedPaginator
+from django_async_backend.db.models.convert import to_async_queryset
 
 
 class _DateHierarchyQuerySet:
@@ -134,6 +138,10 @@ class AsyncChangeList(ChangeList):
         self.paginator = None
 
     async def aget_results(self, request):
+        # A get_queryset() override may hand back a sync queryset: run it
+        # natively rather than through Django's thread-backed __aiter__.
+        self.root_queryset = to_async_queryset(self.root_queryset)
+        self.queryset = to_async_queryset(self.queryset)
         # Filters that defer their choices load them now; drop the ones that
         # turn out to have nothing to show.
         for spec in self.filter_specs:
@@ -185,7 +193,57 @@ class AsyncChangeList(ChangeList):
         self.can_show_all = can_show_all
         self.multi_page = multi_page
         self.paginator = paginator
+        await self._aprepare_list_display()
         return self
+
+    async def _aprepare_list_display(self):
+        """Evaluate ``async def`` list_display entries ahead of rendering.
+
+        ``lookup_field()`` calls list_display callables synchronously while
+        the result rows render. An async callable (on the ModelAdmin, the
+        model, or passed directly) is awaited here for every row and the
+        entry is replaced by a sync stand-in that returns the stored value.
+        """
+        prepared = []
+        replaced = {}
+        for entry in self.list_display:
+            func = None
+            kind = None
+            if callable(entry):
+                func, kind = entry, "callable"
+            elif isinstance(entry, str):
+                admin_attr = getattr(self.model_admin, entry, None)
+                model_attr = getattr(self.model, entry, None)
+                if entry != "__str__" and admin_attr is not None:
+                    func, kind = admin_attr, "admin"
+                elif model_attr is not None:
+                    func, kind = model_attr, "model"
+            if func is None or not inspect.iscoroutinefunction(func):
+                prepared.append(entry)
+                continue
+            values = {}
+            for obj in self.result_list:
+                if kind == "model":
+                    values[obj.pk] = await getattr(obj, entry)()
+                else:
+                    values[obj.pk] = await func(obj)
+
+            def stand_in(obj, _values=values):
+                return _values.get(obj.pk)
+
+            functools.update_wrapper(stand_in, func)
+            if isinstance(entry, str):
+                stand_in.__name__ = entry
+                if not hasattr(stand_in, "short_description"):
+                    stand_in.short_description = entry.replace("_", " ")
+            prepared.append(stand_in)
+            replaced[entry] = stand_in
+        if replaced:
+            self.list_display = prepared
+            # Links are matched by identity with list_display entries.
+            self.list_display_links = [
+                replaced.get(link, link) for link in self.list_display_links
+            ]
 
 
 class AsyncAutocompleteJsonView(AutocompleteJsonView):

@@ -59,7 +59,18 @@ class _PreparedLogEntries(list):
 
 async def arender(response):
     """Render a TemplateResponse here, in the task, through the async
-    template engine, rather than later in a worker thread."""
+    template engine, rather than later in a worker thread.
+
+    Rendering in the view means template-response middleware
+    (``process_template_response``, e.g. the debug toolbar) sees an
+    already-rendered response. Set ``ASYNC_BACKEND_ADMIN_RENDER_IN_VIEW =
+    False`` to hand the unrendered response back instead; Django then runs
+    those hooks and renders it with the sync engine on a worker thread.
+    """
+    from django.conf import settings
+
+    if not getattr(settings, "ASYNC_BACKEND_ADMIN_RENDER_IN_VIEW", True):
+        return response
     if hasattr(response, "render") and callable(response.render):
         if not getattr(response, "is_rendered", True):
             from django_async_backend.template import arender_response
@@ -299,7 +310,7 @@ class AsyncAdminSite(AdminSite):
         url = reverse("admin:password_change_done", current_app=self.name)
         if request.method == "POST":
             form = form_class(user=request.user, data=request.POST)
-            if form.is_valid():  # hashing only, no query
+            if await form.ais_valid():  # hashing in a worker thread
                 await form.asave()
                 await aupdate_session_auth_hash(request, form.user)
                 return HttpResponseRedirect(url)

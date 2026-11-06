@@ -4,6 +4,7 @@ pathname: db/models/sql/query.py
 module:
   new_imports:
     - "from django_async_backend.db import async_connections as connections"
+    - "from django.db.models.sql.query import Query as DjangoQuery"
 
   import_aliases:
     - name: connections
@@ -55,6 +56,11 @@ module:
               to_await: true
 
     Query:
+      # Subclass Django's Query so isinstance() checks in lookups (e.g. the
+      # pk narrowing in In.get_prep_lookup), expressions and Subquery accept
+      # the async query. Every method is regenerated below, so nothing sync
+      # is inherited in practice.
+      bases: ["DjangoQuery"]
       methods:
         get_aggregation:
           to_async: true

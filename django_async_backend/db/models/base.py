@@ -83,6 +83,12 @@ from django_async_backend.db.transaction import (
 
 
 class AsyncModelMixin:
+    async def _async_clean(self):
+        # Model.aclean() may query; Model.clean() must not.
+        if hasattr(self, "aclean"):
+            return await self.aclean()
+        return self.clean()
+
     @classproperty
     def async_objects(cls):
         manager = cls.__dict__.get("_async_objects_cache")
@@ -765,7 +771,7 @@ class AsyncModelMixin:
         # Form.clean() is run even if other validation fails, so do the
         # same with Model.clean() for consistency.
         try:
-            self.clean()
+            await self._async_clean()
         except ValidationError as e:
             errors = e.update_error_dict(errors)
 

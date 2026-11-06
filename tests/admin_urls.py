@@ -81,7 +81,15 @@ class AuthorAdmin(AsyncModelAdmin):
 
 @register(SelectRelatedBookModel, site=site)
 class BookAdmin(AsyncModelAdmin):
-    list_display = ["title", "author", "publisher"]
+    list_display = ["title", "author", "publisher", "review_count"]
+
+    async def review_count(self, obj):
+        # An async list_display callable: awaited per row before rendering.
+        return await SelectRelatedBookModel.async_objects.filter(
+            author=obj.author_id
+        ).acount()
+
+    review_count.short_description = "by same author"
     list_filter = ["author", "publisher", "title"]
     search_fields = ["title"]
     readonly_fields = ["publisher"]
