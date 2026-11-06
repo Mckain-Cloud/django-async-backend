@@ -89,6 +89,48 @@ class AsyncSessionStoreTests(AsyncioTestCase):
         ]
         self.assertEqual(keys, [live.session_key])
 
+    async def test_async_middleware_saves_on_the_async_connection(self):
+        from django.conf import settings
+        from django.http import HttpResponse
+        from django.test import AsyncRequestFactory
+
+        from django_async_backend.contrib.sessions import (
+            AsyncSessionMiddleware,
+        )
+
+        async def view(request):
+            await request.session.aset("seen", True)
+            return HttpResponse("ok")
+
+        middleware = AsyncSessionMiddleware(view)
+        request = AsyncRequestFactory().get("/")
+        response = await middleware(request)
+
+        cookie = response.cookies[settings.SESSION_COOKIE_NAME]
+        self.assertEqual(cookie.value, request.session.session_key)
+        self.assertIn("Cookie", response.headers["Vary"])
+        # Saved inside the test transaction on the async connection.
+        self.assertTrue(
+            await Session.async_objects.filter(
+                session_key=cookie.value
+            ).aexists()
+        )
+        self.assertFalse(
+            await Session.objects.filter(session_key=cookie.value).aexists()
+        )
+        await _close_sync_connections()
+
+        # A second request with the cookie reads it back; untouched sessions
+        # are not re-saved and get no new cookie.
+        async def reader(request):
+            self.assertTrue(await request.session.aget("seen"))
+            return HttpResponse("ok")
+
+        request = AsyncRequestFactory().get("/")
+        request.COOKIES[settings.SESSION_COOKIE_NAME] = cookie.value
+        response = await AsyncSessionMiddleware(reader)(request)
+        self.assertNotIn(settings.SESSION_COOKIE_NAME, response.cookies)
+
     async def test_acycle_key_keeps_data(self):
         store = SessionStore()
         await store.aset("k", "v")
