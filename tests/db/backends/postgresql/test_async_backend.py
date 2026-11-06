@@ -435,7 +435,9 @@ class Tests(AsyncioTestCase):
         A custom cursor factory can be configured with DATABASES["options"]
         ["cursor_factory"].
         """
-        from django_async_backend.db.backends.postgresql.base import AsyncCursor
+        from django_async_backend.db.backends.postgresql.base import (
+            AsyncCursor,
+        )
 
         class MyCursor(AsyncCursor):
             pass
@@ -566,7 +568,12 @@ class Tests(AsyncioTestCase):
         new_connection = no_pool_connection()
         version = await new_connection.get_database_version()
         self.assertTrue(len(version) == 2)
-        self.assertEqual((await new_connection.get_database_version())[0], 15)
+        # Compare with what the server reports instead of pinning a major.
+        async with await new_connection.cursor() as cursor:
+            await cursor.execute("SHOW server_version_num")
+            (server_version_num,) = await cursor.fetchone()
+        self.assertEqual(version, divmod(int(server_version_num), 10000))
+        self.assertEqual(await new_connection.get_database_version(), version)
 
     async def test_check_database_version_supported(self):
         from django_async_backend.db.backends.postgresql.base import (
