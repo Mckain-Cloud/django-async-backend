@@ -644,6 +644,24 @@ async def _inclusion(node, context):
     if inspect.isawaitable(_dict):
         _dict = await _dict
     t = context.render_context.get(node)
+    if (
+        t is None
+        and getattr(node, "template_name", None)
+        and node.filename is None
+    ):
+        # The admin's InclusionAdminNode picks its template per model/app.
+        opts = context["opts"]
+        app_label = opts.app_label.lower()
+        object_name = opts.model_name
+        t = context.template.engine.select_template(
+            [
+                "admin/%s/%s/%s"
+                % (app_label, object_name, node.template_name),
+                "admin/%s/%s" % (app_label, node.template_name),
+                "admin/%s" % node.template_name,
+            ]
+        )
+        context.render_context[node] = t
     if t is None:
         if isinstance(node.filename, Template):
             t = node.filename
