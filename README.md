@@ -308,6 +308,29 @@ relation>.async_objects` managers, `afetch()` of a `GenericForeignKey`, and
 `ContentType` must be in Django's cache before a generic manager is built
 (`await aget_for_model(Model)`); the admin does that itself.
 
+### Templates
+
+`django_async_backend.template` renders Django templates asynchronously:
+
+```python
+from django_async_backend.template import arender_to_string, arender_response
+
+html = await arender_to_string("book.html", {"book": book}, request)
+response = await arender_response(TemplateResponse(request, "book.html", ctx))
+```
+
+During rendering, `{{ book.author.name }}` loads an unfetched relation with
+`afetch()`, `{% for b in author.books.all %}` and `{{ author.books.count }}`
+go through the async related manager, async querysets are evaluated when
+reached, coroutines (async model methods) are awaited, and `simple_tag`,
+`inclusion_tag`, filters and context processors may be `async def`. The
+core tags (`for`, `if`, `with`, `block`/`extends`, `include`, `autoescape`,
+`spaceless`, `filter`, `ifchanged`) have async implementations; every other
+tag renders through its own `render()` after its expressions were resolved
+asynchronously. The admin renders every page this way. Set
+`ASYNC_BACKEND_ASYNC_TEMPLATES = False` to leave `FilterExpression.resolve`
+unpatched (then only `arender*` on templates without custom tags works).
+
 ### Custom descriptors
 
 A custom descriptor or manager takes part in `prefetch_related()` by
