@@ -58,11 +58,13 @@ class _PreparedLogEntries(list):
 
 
 async def arender(response):
-    """Render a TemplateResponse here, in the task, rather than later in a
-    worker thread (where a lazy query would silently use the sync ORM)."""
+    """Render a TemplateResponse here, in the task, through the async
+    template engine, rather than later in a worker thread."""
     if hasattr(response, "render") and callable(response.render):
         if not getattr(response, "is_rendered", True):
-            response.render()
+            from django_async_backend.template import arender_response
+
+            response = await arender_response(response)
     return response
 
 

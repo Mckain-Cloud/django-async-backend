@@ -1,0 +1,1 @@
+{% extends 'base.html' %}{% block title %}{{ block.super }}/child{% endblock %}{% block body %}{% for b in author.books.all %}[{{ b.title }}:{{ b.author.name }}]{% endfor %}{% include 'inc.html' with first=author.books.first %}{% endblock %}

@@ -37,6 +37,13 @@ class DjangoAsyncBackendConfig(AppConfig):
 
             patch_signal_dispatch()
 
+        if getattr(settings, "ASYNC_BACKEND_ASYNC_TEMPLATES", True):
+            from django_async_backend.template.patch import (
+                patch_template_resolve,
+            )
+
+            patch_template_resolve()
+
         if getattr(settings, "ASYNC_BACKEND_ASYNC_LAST_LOGIN", False):
             from django_async_backend.contrib.auth import patch_last_login
 
