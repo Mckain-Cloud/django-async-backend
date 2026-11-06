@@ -89,11 +89,13 @@ from django_async_backend.contrib.admin.utils import (
 from django_async_backend.contrib.admin.views import AsyncChangeList
 from django_async_backend.db.transaction import async_atomic
 from django_async_backend.forms import (
+    AsyncBaseGenericInlineFormSet,
     AsyncBaseInlineFormSet,
     AsyncModelChoiceField,
     AsyncModelForm,
     AsyncModelMultipleChoiceField,
     aprepare_instance,
+    async_generic_inlineformset_factory,
     async_inlineformset_factory,
     async_modelform_factory,
     async_modelformset_factory,
@@ -1246,7 +1248,10 @@ class AsyncGenericInlineModelAdmin(AsyncBaseModelAdminMixin, InlineModelAdmin):
 
     ct_field = "content_type"
     ct_fk_field = "object_id"
-    formset = None  # AsyncBaseGenericInlineFormSet, resolved lazily
+    # Must be a real BaseModelFormSet subclass at class level: admin.E206
+    # inspects it, and whether that check runs before or after the URLconf
+    # registers the site depends on the (set-ordered) check registry.
+    formset = AsyncBaseGenericInlineFormSet
 
     @property
     def checks_class(self):
@@ -1257,11 +1262,6 @@ class AsyncGenericInlineModelAdmin(AsyncBaseModelAdminMixin, InlineModelAdmin):
         return GenericInlineModelAdminChecks
 
     def get_formset(self, request, obj=None, **kwargs):
-        from django_async_backend.forms.models import (
-            AsyncBaseGenericInlineFormSet,
-            async_generic_inlineformset_factory,
-        )
-
         if "fields" in kwargs:
             fields = kwargs.pop("fields")
         else:
@@ -1288,7 +1288,7 @@ class AsyncGenericInlineModelAdmin(AsyncBaseModelAdminMixin, InlineModelAdmin):
             "formfield_callback": partial(
                 self.formfield_for_dbfield, request=request
             ),
-            "formset": self.formset or AsyncBaseGenericInlineFormSet,
+            "formset": self.formset,
             "extra": self.get_extra(request, obj),
             "can_delete": can_delete,
             "can_order": False,
