@@ -209,6 +209,32 @@ class AsyncAdminTests(AsyncioTransactionTestCase):
             ).aexists()
         )
 
+    async def test_delete_with_cascades_lists_children(self):
+        await self._login()
+        url = (
+            "/admin/test_app/selectrelatedauthormodel/%s/delete/" % self.a1.pk
+        )
+        mine = [b for b in self.books if b.author_id == self.a1.pk]
+        with no_sync_queries():
+            r = await self.client.get(url)
+            self.assertEqual(r.status_code, 200)
+            body = r.content.decode()
+            for b in mine:
+                self.assertIn(b.title, body)
+            r = await self.client.post(url, {"post": "yes"})
+            self.assertEqual(r.status_code, 302)
+        self.assertFalse(
+            await SelectRelatedAuthorModel.async_objects.filter(
+                pk=self.a1.pk
+            ).aexists()
+        )
+        self.assertEqual(
+            await SelectRelatedBookModel.async_objects.filter(
+                pk__in=[b.pk for b in mine]
+            ).acount(),
+            0,
+        )
+
     async def test_validation_errors_are_rendered(self):
         await self._login()
         with no_sync_queries():

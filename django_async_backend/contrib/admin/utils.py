@@ -30,6 +30,10 @@ class AsyncNestedObjects(Collector):
         self.edges.setdefault(source, []).append(target)
 
     async def collect(self, objs, source=None, source_attr=None, **kwargs):
+        # Cascades hand us async querysets (the base collector evaluates
+        # them itself); the edge bookkeeping below needs the rows first.
+        if hasattr(objs, "__aiter__") and not isinstance(objs, (list, tuple)):
+            objs = [obj async for obj in objs]
         for obj in objs:
             if source_attr and not source_attr.endswith("+"):
                 related_name = source_attr % {

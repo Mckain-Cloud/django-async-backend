@@ -272,6 +272,37 @@ Django's parallel behaviour. Sync receivers are still dispatched through
 `sync_to_async()` on the *sync* connection, outside the async transaction:
 inside `async_atomic()`, receivers that touch the database must be `async`.
 
+### Forms
+
+`django_async_backend.forms` has `AsyncModelForm`, `AsyncModelChoiceField`,
+`AsyncModelMultipleChoiceField`, async model/inline formsets and the matching
+factories. Validation (`ais_valid()`, unique and constraint checks), saving
+(`asave()`, `asave_m2m()`) and choice loading (`aload_choices()`) run on the
+async connection; the sync methods keep working for sync views.
+
+### Admin, auth, sessions, messages
+
+`django_async_backend.contrib` carries the rest of the request path:
+
+| piece | setting |
+| --- | --- |
+| `contrib.auth.AsyncModelBackend` | `AUTHENTICATION_BACKENDS` |
+| `contrib.sessions` (`SessionStore`) | `SESSION_ENGINE` |
+| `contrib.sessions.AsyncSessionMiddleware` | replaces `SessionMiddleware` |
+| `contrib.messages.AsyncMessageMiddleware` | replaces `MessageMiddleware` |
+| `contrib.admin.AsyncAdminSite` / `AsyncModelAdmin` / inlines | your admin site |
+
+With all of them in place, logging in, the admin index, changelists with
+filters, search and pagination, add/change forms with inlines and
+many-to-many fields, delete confirmations with cascades, actions, history,
+autocomplete, raw-id widgets, list-editable rows, password change and logout
+run entirely on the task's async connection; the end-to-end tests run every
+request under a guard that fails on any synchronous cursor. Templates are
+still rendered synchronously (in the view's task) from pre-evaluated context,
+so a lazy query inside a template raises instead of running on a thread.
+Not supported: `date_hierarchy`, facet counts, `SimpleListFilter` subclasses
+that query in `lookups()`, and generic relations.
+
 ### Custom descriptors
 
 A custom descriptor or manager takes part in `prefetch_related()` by
