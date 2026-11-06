@@ -29,3 +29,8 @@ class DjangoAsyncBackendConfig(AppConfig):
 
         _patch_model()
         check_middleware()
+
+        if getattr(settings, "ASYNC_BACKEND_ASYNC_LAST_LOGIN", False):
+            from django_async_backend.contrib.auth import patch_last_login
+
+            patch_last_login()

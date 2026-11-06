@@ -63,9 +63,11 @@ async def _fetch_deferred(descriptor, instance):
     manager = instance.__class__._async_base_manager.db_manager(
         instance._state.db, hints={"instance": instance}
     )
-    value = await manager.filter(pk=instance.pk).values_list(
-        field.attname, flat=True
-    ).aget()
+    value = (
+        await manager.filter(pk=instance.pk)
+        .values_list(field.attname, flat=True)
+        .aget()
+    )
     setattr(instance, field.attname, value)
     if field.is_relation and field.is_cached(instance):
         field.delete_cached_value(instance)

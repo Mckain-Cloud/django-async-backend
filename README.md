@@ -190,8 +190,8 @@ Legend: ✅ supported · ❌ not supported · ⚠️ supported with caveats
 | `Model.objects.distinct`            | ✅        |          |
 | `Model.objects.extra`               | ✅        |          |
 | `Model.objects.reverse`             | ✅        |          |
-| `Model.objects.defer`               | ⚠️        | not safe for async, will not be implemented — use `values`/`values_list` |
-| `Model.objects.only`                | ⚠️        | not safe for async, will not be implemented — use `values`/`values_list` |
+| `Model.objects.defer`               | ⚠️        | reading a deferred field in async code raises `SynchronousOnlyOperation`; load it with `await obj.afetch("field")` |
+| `Model.objects.only`                | ⚠️        | same caveat as `defer` |
 | `Model.objects.using`               | ✅        |          |
 | `Model.objects.resolve_expression`  | ✅        |          |
 | `Model.objects.ordered`             | ✅        |          |
@@ -200,7 +200,8 @@ Legend: ✅ supported · ❌ not supported · ⚠️ supported with caveats
 | `Model.objects.dates`               | ✅        |          |
 | `Model.objects.datetimes`           | ✅        |          |
 | `Model.objects.alias`               | ✅        |          |
-| `Model.objects.aiterator`           | ❌        |          |
+| `Model.objects.aiterator`           | ✅        | server-side cursor; closed as soon as the consumer stops iterating |
+| `Model.objects.raw`                 | ✅        | returns the async `RawQuerySet` below |
 
 `GenericForeignKey` prefetches run one target query per content type,
 sequentially on the task's connection. ContentType cache misses are resolved
@@ -232,12 +233,37 @@ equivalents are the names in the comments column.
 | `Model.asave`            | ✅        | `async_save`             |
 | `Model.adelete`          | ✅        | `async_delete`           |
 | `Model.arefresh_from_db` | ✅        | `async_refresh_from_db`  |
+| `Model.full_clean`       | ✅        | `async_full_clean` (also `async_validate_unique`, `async_validate_constraints`); unique and check constraints are validated on the async connection |
+| `Model.afetch`           | ✅        | new: `await obj.afetch("author", "body", "tags")` loads forward FKs, reverse one-to-ones, deferred fields and multi-valued relations, filling Django's caches so the plain attribute works afterwards |
 
 ### RawQuerySet
 
-Not supported ❌
+Supported ✅ — `Model.async_objects.raw(sql, params)` returns an async
+`RawQuerySet`: iterate it with `async for` (cached) or `.aiterator()`
+(streamed). `len()`, `bool()`, indexing and sync iteration raise `TypeError`.
 
 ### Related managers
 
-Not supported ❌ — `instance.<related>.all()` is the sync ORM. See
-[Pitfalls](#pitfalls).
+Supported ✅ through `instance.<related>.async_objects`, on reverse foreign
+keys and both sides of many-to-many fields:
+
+```python
+async for book in author.books.async_objects.order_by("title"):
+    ...
+await author.books.async_objects.acreate(title="New")
+await book.tags.async_objects.aadd(tag)      # native: same transaction
+await book.tags.async_objects.aset([t1, t2])
+```
+
+`aadd`/`aremove`/`aclear`/`aset`/`acreate`/`aget_or_create`/
+`aupdate_or_create` run on the task's connection and send `m2m_changed`
+with `asend()`. The plain `instance.<related>` manager (and its own `a*`
+methods) is still Django's thread-backed sync ORM. Generic relations are not
+covered.
+
+### Custom descriptors
+
+A custom descriptor or manager takes part in `prefetch_related()` by
+implementing `async def aget_prefetch_querysets(self, instances, querysets)`
+(same six-tuple as Django's hook, with an async queryset) and in `afetch()`
+by implementing `async def aget_object(self, instance)`.

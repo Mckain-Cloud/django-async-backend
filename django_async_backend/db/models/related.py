@@ -18,7 +18,10 @@ They are exposed as ``instance.<relation>.async_objects``::
 """
 
 from django.db import router
-from django.db.models import Q, signals
+from django.db.models import (
+    Q,
+    signals,
+)
 from django.db.models.fields import related_descriptors
 from django.db.models.utils import resolve_callables
 
@@ -313,9 +316,8 @@ def create_async_many_to_many_manager(rel, reverse):
                     [
                         self.through(
                             **{
-                                "%s_id" % source_field_name: self.related_val[
-                                    0
-                                ],
+                                "%s_id"
+                                % source_field_name: self.related_val[0],
                                 "%s_id" % target_field_name: target_id,
                             }
                         )
@@ -345,9 +347,8 @@ def create_async_many_to_many_manager(rel, reverse):
                         self.through(
                             **through_defaults,
                             **{
-                                "%s_id" % source_field_name: self.related_val[
-                                    0
-                                ],
+                                "%s_id"
+                                % source_field_name: self.related_val[0],
                                 "%s_id" % target_field_name: target_id,
                             },
                         )
@@ -389,7 +390,11 @@ def create_async_many_to_many_manager(rel, reverse):
             )
 
         async def _aremove_items(
-            self, source_field_name, target_field_name, *objs, using=None,
+            self,
+            source_field_name,
+            target_field_name,
+            *objs,
+            using=None,
             raw=False,
         ):
             if not objs:
