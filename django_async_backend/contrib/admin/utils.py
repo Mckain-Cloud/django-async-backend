@@ -148,18 +148,7 @@ async def aget_deleted_objects(objs, request, admin_site):
     return to_delete, model_count, perms_needed, protected
 
 
-async def awarm_permissions(user):
-    """Load the user's permissions on the async connection.
-
-    Django's sync ``has_perm()``/``has_module_perms()`` then find the
-    per-user caches and run no query, so the admin's many permission checks
-    (and the ``perms`` template variable) stay on this task's connection.
-    Superusers short-circuit without a query.
-    """
-    if user.is_anonymous or getattr(user, "is_superuser", False):
-        return
-    if hasattr(user, "aget_all_permissions"):
-        await user.aget_all_permissions()
+from django_async_backend.contrib.auth import awarm_permissions  # noqa: E402,F401
 
 
 class PreparedPaginator:

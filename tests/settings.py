@@ -28,6 +28,7 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django_async_backend",
+    "rest_framework",
     "test_app",
 ]
 

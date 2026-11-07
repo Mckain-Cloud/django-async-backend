@@ -4,7 +4,7 @@ from django.contrib.admin import (
     ShowFacets,
     register,
 )
-from django.urls import path
+from django.urls import include, path
 from test_app.models import (
     DatesModel,
     GenericChildModel,
@@ -116,4 +116,59 @@ class TestModelAdmin(AsyncModelAdmin):
     raw_id_fields = ["relative"]
 
 
-urlpatterns = [path("admin/", site.urls)]
+# ---- REST framework (django_async_backend.contrib.rest_framework) ----------
+
+from rest_framework import permissions  # noqa: E402
+
+from django_async_backend.contrib import rest_framework as arf  # noqa: E402
+
+
+from rest_framework import serializers as drf_serializers  # noqa: E402
+
+
+class BookSerializer(arf.AsyncModelSerializer):
+    author_name = drf_serializers.CharField(source="author.name", read_only=True)
+    shout = drf_serializers.SerializerMethodField()
+
+    class Meta:
+        model = SelectRelatedBookModel
+        fields = ["id", "title", "author", "publisher", "author_name", "shout"]
+
+    async def aget_shout(self, obj):
+        await obj.afetch("author")
+        return (obj.title + " by " + obj.author.name).upper()
+
+
+class OwnerSerializer(arf.AsyncModelSerializer):
+    tag_names = drf_serializers.StringRelatedField(
+        source="tags", many=True, read_only=True
+    )
+
+    class Meta:
+        model = M2MOwnerModel
+        fields = ["id", "name", "tags", "tag_names"]
+
+
+class BookViewSet(arf.AsyncModelViewSet):
+    queryset = SelectRelatedBookModel.objects.select_related("author").order_by("pk")
+    serializer_class = BookSerializer
+    authentication_classes = [arf.AsyncSessionAuthentication]
+    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    pagination_class = arf.AsyncPageNumberPagination
+    pagination_class.page_size = 5
+
+
+class OwnerViewSet(arf.AsyncModelViewSet):
+    queryset = M2MOwnerModel.objects.prefetch_related("tags").order_by("pk")
+    serializer_class = OwnerSerializer
+    authentication_classes = [arf.AsyncSessionAuthentication]
+    permission_classes = [permissions.DjangoModelPermissionsOrAnonReadOnly]
+    pagination_class = arf.AsyncLimitOffsetPagination
+    pagination_class.default_limit = 5
+
+
+router = arf.DefaultRouter()
+router.register("books", BookViewSet, basename="book")
+router.register("owners", OwnerViewSet, basename="owner")
+
+urlpatterns = [path("admin/", site.urls), path("api/", include(router.urls))]

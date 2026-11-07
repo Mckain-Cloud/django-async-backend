@@ -96,6 +96,20 @@ class AsyncModelBackend(ModelBackend):
         return UserModel.async_objects.filter(pk__in=queryset.values("pk"))
 
 
+async def awarm_permissions(user):
+    """Load the user's permissions on the async connection.
+
+    Django's sync ``has_perm()``/``has_perms()``/``has_module_perms()`` then
+    find the per-user caches and run no query, so sync permission checks
+    (admin, DRF ``DjangoModelPermissions``, the ``perms`` template variable)
+    stay on this task's connection. Superusers short-circuit without a query.
+    """
+    if user is None or user.is_anonymous or getattr(user, "is_superuser", False):
+        return
+    if hasattr(user, "aget_all_permissions"):
+        await user.aget_all_permissions()
+
+
 async def aupdate_last_login(sender, user, **kwargs):
     """Async replacement for `django.contrib.auth.models.update_last_login`.
 
