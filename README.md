@@ -417,6 +417,13 @@ router.register("books", BookViewSet)
 - Not covered: writable nested serializers (as in DRF), filter backends that
   evaluate the queryset, the browsable API's `OPTIONS` metadata (it iterates
   related querysets synchronously).
+- `adata` is a plain property returning a coroutine rather than adrf's
+  `async_property`, whose descriptor runs `functools.wraps()` on every
+  access; on free-threaded CPython 3.15 assigning function attributes
+  serialises all threads (hundreds of times slower with two workers), which
+  made adrf viewsets slower with more worker threads. DRF's own
+  `Field._creation_counter += 1` per field instance is a smaller version of
+  the same problem.
 
 ### Free-threaded Python
 
