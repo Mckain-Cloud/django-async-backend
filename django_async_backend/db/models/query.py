@@ -1,12 +1,15 @@
 # This file was generated automatically. Do not modify it manually. (based on django 6.1)
 from contextlib import aclosing
 
+from django.db.models.query import QuerySet as DjangoQuerySet
+
 from django_async_backend.db import async_connections
 from django_async_backend.db.models import sql as async_sql
 from django_async_backend.db.models.prefetch import (
     get_prefetcher,
     prefetch_one_level,
 )
+from django_async_backend.db.models.sync_only import install_sync_only_stubs
 from django_async_backend.db.transaction import (
     async_atomic,
     async_mark_for_rollback_on_error,
@@ -359,7 +362,7 @@ class PreventQuerySetCloning:
         self.queryset._enable_cloning()
 
 
-class QuerySet(AltersData):
+class QuerySet(DjangoQuerySet):
     async def aiterator(self, chunk_size=2000):
         if chunk_size <= 0:
             raise ValueError("Chunk size must be strictly positive.")
@@ -2676,3 +2679,6 @@ def get_related_populators(klass_info, select, db, fetch_mode):
 
 
 aprefetch_related_objects = prefetch_related_objects
+
+
+install_sync_only_stubs(QuerySet)

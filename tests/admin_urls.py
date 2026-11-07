@@ -213,8 +213,40 @@ class BookAutoFilteredViewSet(BookFilteredViewSet):
     filterset_fields = ["author", "publisher"]
 
 
+class TwoPerMinute(arf.AsyncAnonRateThrottle):
+    # SimpleRateThrottle reads DEFAULT_THROTTLE_RATES at import time, so an
+    # explicit rate is the reliable way to configure a test throttle.
+    rate = "2/min"
+
+
+class BookThrottledViewSet(arf.AsyncReadOnlyModelViewSet):
+    queryset = SelectRelatedBookModel.objects.select_related("author").order_by("pk")
+    serializer_class = BookSerializer
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+    pagination_class = None
+    throttle_classes = [TwoPerMinute]
+
+
+# A view under acache_page(): computes once per URL, then serves from the
+# async cache.
+from django.http import JsonResponse  # noqa: E402
+
+from django_async_backend.core.cache import acache_page  # noqa: E402
+
+CACHED_VIEW_HITS = []
+
+
+@acache_page(30)
+async def cached_view(request):
+    count = await SelectRelatedBookModel.async_objects.acount()
+    CACHED_VIEW_HITS.append(request.GET.get("q"))
+    return JsonResponse({"books": count, "q": request.GET.get("q")})
+
+
 router = arf.DefaultRouter()
 router.register("books", BookViewSet, basename="book")
+router.register("throttled-books", BookThrottledViewSet, basename="throttled-book")
 router.register("owners", OwnerViewSet, basename="owner")
 router.register("objperm-books", BookObjectPermViewSet, basename="objperm-book")
 router.register("token-books", BookTokenViewSet, basename="token-book")
@@ -223,4 +255,8 @@ router.register(
     "autofiltered-books", BookAutoFilteredViewSet, basename="autofiltered-book"
 )
 
-urlpatterns = [path("admin/", site.urls), path("api/", include(router.urls))]
+urlpatterns = [
+    path("admin/", site.urls),
+    path("api/", include(router.urls)),
+    path("cached/", cached_view),
+]

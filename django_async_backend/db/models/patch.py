@@ -12,6 +12,7 @@ from django.db.models.base import Model
 from django_async_backend.db.models.base import AsyncModelMixin
 from django_async_backend.db.models.fetch import afetch
 from django_async_backend.db.models.related import patch_related_managers
+from django_async_backend.db.models.validation import aclean_fields
 
 _ORIGINAL_MODEL_ATTRS = frozenset(dir(Model))
 _ASYNC_MIXIN_MEMBERS = {
@@ -21,6 +22,7 @@ _ASYNC_MIXIN_MEMBERS = {
 }
 # Hand-written additions that are not part of the generated mixin.
 _ASYNC_MIXIN_MEMBERS["afetch"] = afetch
+_ASYNC_MIXIN_MEMBERS["aclean_fields"] = aclean_fields
 
 _patched = False
 

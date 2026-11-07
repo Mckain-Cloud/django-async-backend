@@ -29,6 +29,21 @@ class AsyncFullCleanTests(AsyncioTestCase):
     async def test_valid_instance_passes(self):
         await TestModel(name="free", value=1).async_full_clean()
 
+    async def test_foreign_key_existence_is_checked_asynchronously(self):
+        # ForeignKey.validate() runs a query; aclean_fields() awaits it.
+        obj = TestModel(name="fk-ok", value=1, relative=self.existing)
+        await obj.async_full_clean()
+        bad = TestModel(name="fk-bad", value=1, relative_id=999999)
+        with self.assertRaises(ValidationError) as cm:
+            await bad.async_full_clean()
+        self.assertEqual(list(cm.exception.message_dict), ["relative"])
+        self.assertIn("not a valid choice", cm.exception.message_dict["relative"][0])
+
+    async def test_aclean_fields_coerces_like_clean_fields(self):
+        obj = TestModel(name="coerce", value="7")
+        await obj.aclean_fields()
+        self.assertEqual(obj.value, 7)
+
     async def test_unique_field_violation(self):
         with self.assertRaises(ValidationError) as cm:
             await TestModel(name="taken", value=1).async_full_clean()

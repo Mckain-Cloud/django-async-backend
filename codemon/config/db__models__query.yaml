@@ -9,6 +9,8 @@ module:
     - "from django_async_backend.db.transaction import async_mark_for_rollback_on_error"
     - "from django_async_backend.db.models.prefetch import prefetch_one_level"
     - "from django_async_backend.db.models.prefetch import get_prefetcher"
+    - "from django.db.models.query import QuerySet as DjangoQuerySet"
+    - "from django_async_backend.db.models.sync_only import install_sync_only_stubs"
 
   import_aliases:
     # The async Collector lives in django_async_backend.db.models.deletion,
@@ -43,6 +45,8 @@ module:
   add_raw_bottom:
     - |
       aprefetch_related_objects = prefetch_related_objects
+    - |
+      install_sync_only_stubs(QuerySet)
 
   classes:
     Prefetch:
@@ -64,6 +68,13 @@ module:
                   )
 
     QuerySet:
+      # A real subclass of Django's QuerySet, so isinstance() checks in Django
+      # and third-party code take the queryset branch. The sync API that
+      # inheritance would re-expose is shadowed below with loud errors
+      # (django_async_backend.db.models.sync_only).
+      # The sync-only stubs are attached at module bottom (add_raw_bottom):
+      # class-body assignments would be caught by the rename rules below.
+      bases: ["DjangoQuerySet"]
       add_raw_top:
         - |
           async def aiterator(self, chunk_size=2000):

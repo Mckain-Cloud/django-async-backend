@@ -77,6 +77,38 @@ class ModelOverrideCheckTests(SimpleTestCase):
             self.assertEqual(check_model_overrides(), [])
 
 
+class AdminOverrideCheckTests(SimpleTestCase):
+    def test_reports_sync_admin_hooks(self):
+        from django_async_backend.checks import check_admin_overrides
+        from django_async_backend.contrib.admin import AsyncAdminSite, AsyncModelAdmin
+
+        class LegacyAdmin(AsyncModelAdmin):
+            def save_model(self, request, obj, form, change):
+                pass
+
+        class PortedAdmin(AsyncModelAdmin):
+            def save_model(self, request, obj, form, change):
+                pass
+
+            async def asave_model(self, request, obj, form, change):
+                pass
+
+        site = AsyncAdminSite(name="check-probe")
+        site.register(TestModel, LegacyAdmin)
+        site.register(OverrideProbeModel, PortedAdmin)
+        result = check_admin_overrides()
+        self.assertEqual(
+            [e.msg for e in result if e.obj is LegacyAdmin],
+            [
+                "tests.test_checks.AdminOverrideCheckTests.test_reports_sync_admin_hooks."
+                "<locals>.LegacyAdmin overrides save_model() but not asave_model()."
+            ],
+        )
+        self.assertTrue(all(e.id == "async_backend.W003" for e in result))
+        self.assertEqual([e for e in result if e.obj is PortedAdmin], [])
+        del site  # the registry of admin sites is a WeakSet
+
+
 def sync_probe_receiver(sender, **kwargs):
     pass
 

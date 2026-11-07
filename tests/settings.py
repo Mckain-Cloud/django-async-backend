@@ -67,6 +67,15 @@ AUTHENTICATION_BACKENDS = [
 ]
 SESSION_ENGINE = "django_async_backend.contrib.sessions"
 ASYNC_BACKEND_ASYNC_LAST_LOGIN = True
+
+# The test database creation runs createcachetable for database caches.
+CACHES = {
+    "default": {
+        "BACKEND": "django_async_backend.core.cache.AsyncDatabaseCache",
+        "LOCATION": "test_cache_table",
+        "OPTIONS": {"MAX_ENTRIES": 50, "CULL_FREQUENCY": 2},
+    },
+}
 # Fast hasher: these tests log in a lot.
 PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]
 

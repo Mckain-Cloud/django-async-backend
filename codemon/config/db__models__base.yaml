@@ -518,6 +518,13 @@ module:
             - func:
                 attr: clean
               replace_raw: "await self._async_clean()"
+            # ForeignKey.validate() queries: the hand-written aclean_fields()
+            # (db/models/validation.py) checks existence with aexists().
+            - func:
+                attr: clean_fields
+                rename:
+                  attr: aclean_fields
+              to_await: true
             - func:
                 attr: validate_unique
                 rename:

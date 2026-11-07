@@ -764,7 +764,7 @@ class AsyncModelMixin:
             exclude = set(exclude)
 
         try:
-            self.clean_fields(exclude=exclude)
+            await self.aclean_fields(exclude=exclude)
         except ValidationError as e:
             errors = e.update_error_dict(errors)
 

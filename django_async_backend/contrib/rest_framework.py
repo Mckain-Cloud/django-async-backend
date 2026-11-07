@@ -48,7 +48,7 @@ from django.db.models.manager import BaseManager
 from django.http import Http404
 from django.utils.translation import gettext_lazy as _
 from rest_framework import authentication, exceptions, pagination, permissions
-from rest_framework import relations, status
+from rest_framework import relations, status, throttling
 from rest_framework.exceptions import ValidationError
 from rest_framework.fields import SerializerMethodField, SkipField, empty
 from rest_framework.fields import get_error_detail
@@ -87,6 +87,10 @@ __all__ = [
     "AsyncDjangoObjectPermissions",
     "AsyncRemoteUserAuthentication",
     "AsyncTokenAuthentication",
+    "AsyncAnonRateThrottle",
+    "AsyncScopedRateThrottle",
+    "AsyncSimpleRateThrottle",
+    "AsyncUserRateThrottle",
     "AsyncCreateAPIView",
     "AsyncDestroyAPIView",
     "AsyncGenericAPIView",
@@ -1162,6 +1166,51 @@ class AsyncRetrieveUpdateDestroyAPIView(
 
     async def delete(self, request, *args, **kwargs):
         return await self.adestroy(request, *args, **kwargs)
+
+
+# -------------------------------------------------------------- throttles ----
+
+
+class AsyncSimpleRateThrottle(throttling.SimpleRateThrottle):
+    """``SimpleRateThrottle`` awaiting the cache (async with
+    ``django_async_backend.core.cache.AsyncDatabaseCache``)."""
+
+    async def allow_request(self, request, view):
+        if self.rate is None:
+            return True
+        self.key = self.get_cache_key(request, view)
+        if self.key is None:
+            return True
+        self.history = await self.cache.aget(self.key, [])
+        self.now = self.timer()
+        while self.history and self.history[-1] <= self.now - self.duration:
+            self.history.pop()
+        if len(self.history) >= self.num_requests:
+            return self.throttle_failure()
+        return await self.athrottle_success()
+
+    async def athrottle_success(self):
+        self.history.insert(0, self.now)
+        await self.cache.aset(self.key, self.history, self.duration)
+        return True
+
+
+class AsyncAnonRateThrottle(AsyncSimpleRateThrottle, throttling.AnonRateThrottle):
+    pass
+
+
+class AsyncUserRateThrottle(AsyncSimpleRateThrottle, throttling.UserRateThrottle):
+    pass
+
+
+class AsyncScopedRateThrottle(AsyncSimpleRateThrottle, throttling.ScopedRateThrottle):
+    async def allow_request(self, request, view):
+        self.scope = getattr(view, self.scope_attr, None)
+        if not self.scope:
+            return True
+        self.rate = self.get_rate()
+        self.num_requests, self.duration = self.parse_rate(self.rate)
+        return await AsyncSimpleRateThrottle.allow_request(self, request, view)
 
 
 # --------------------------------------------------------------- viewsets ----

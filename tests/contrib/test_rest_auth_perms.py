@@ -110,6 +110,19 @@ class AuthAndObjectPermissionTests(AsyncioTransactionTestCase):
             r = await self.client.delete(base + "%s/" % self.theirs.pk, **good)
             self.assertEqual(r.status_code, 403)
 
+    async def test_async_anon_throttle_on_the_cache(self):
+        from django.core.cache import caches
+
+        await caches["default"].aclear()
+        base = "/api/throttled-books/"
+        with no_sync_queries():
+            self.assertEqual((await self.client.get(base)).status_code, 200)
+            self.assertEqual((await self.client.get(base)).status_code, 200)
+            r = await self.client.get(base)
+            self.assertEqual(r.status_code, 429, r.content[:200])
+            self.assertIn("Retry-After", r.headers)
+        await caches["default"].aclear()
+
     async def test_token_auth(self):
         token = await Token.async_objects.acreate(user=self.user)
         self.assertTrue(token.key)  # async_save twin generated it

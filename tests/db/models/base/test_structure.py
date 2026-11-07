@@ -25,6 +25,7 @@ EXEMPT = {
     "_state",
     "NotUpdated",
     "aclean",
+    "aclean_fields",  # hand-written: db/models/validation.py
     "clean",
     "clean_fields",
     "get_constraints",

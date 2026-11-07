@@ -157,6 +157,68 @@ def check_sync_receivers(app_configs=None, **kwargs):
     return errors
 
 
+ADMIN_OVERRIDE_PAIRS = (
+    ("save_model", "asave_model"),
+    ("delete_model", "adelete_model"),
+    ("save_formset", "asave_formset"),
+    ("save_related", "asave_related"),
+)
+
+
+def check_admin_overrides(app_configs=None, **kwargs):
+    """``async_backend.W003``: an async admin overrides a sync save hook.
+
+    ``AsyncModelAdmin`` calls ``asave_model()``, ``adelete_model()``,
+    ``asave_formset()`` and ``asave_related()``; a ``save_model()`` override
+    written for Django's admin is never called.
+    """
+    klass = _level("ASYNC_BACKEND_OVERRIDE_CHECK")
+    if klass is None:
+        return []
+    try:
+        from django.contrib.admin.sites import all_sites
+
+        from django_async_backend.contrib.admin.options import AsyncModelAdmin
+    except Exception:  # pragma: no cover - admin not importable
+        return []
+    errors = []
+    seen = set()
+    for site in all_sites:
+        for model, admin in site._registry.items():
+            if not isinstance(admin, AsyncModelAdmin):
+                continue
+            admin_cls = type(admin)
+            if admin_cls in seen:
+                continue
+            seen.add(admin_cls)
+            for sync_name, async_name in ADMIN_OVERRIDE_PAIRS:
+                sync_impl = inspect.getattr_static(admin_cls, sync_name, None)
+                if sync_impl is None or sync_impl is inspect.getattr_static(
+                    AsyncModelAdmin, sync_name, None
+                ):
+                    continue
+                async_impl = inspect.getattr_static(admin_cls, async_name, None)
+                if async_impl is not inspect.getattr_static(AsyncModelAdmin, async_name, None):
+                    continue
+                errors.append(
+                    klass(
+                        "%s.%s overrides %s() but not %s()." % (
+                            admin_cls.__module__, admin_cls.__qualname__, sync_name, async_name
+                        ),
+                        hint=(
+                            "The async admin calls %s(); the sync override is "
+                            "never reached. Move the logic to async def %s(). "
+                            "Silence with ASYNC_BACKEND_OVERRIDE_CHECK = 'off'."
+                            % (async_name, async_name)
+                        ),
+                        obj=admin_cls,
+                        id="async_backend.W003",
+                    )
+                )
+    return errors
+
+
 def register():
     checks.register(check_model_overrides, checks.Tags.models)
     checks.register(check_sync_receivers, checks.Tags.signals)
+    checks.register(check_admin_overrides, checks.Tags.admin)

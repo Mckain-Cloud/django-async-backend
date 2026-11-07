@@ -425,6 +425,46 @@ router.register("books", BookViewSet)
   `Field._creation_counter += 1` per field instance is a smaller version of
   the same problem.
 
+### The async QuerySet is a Django QuerySet
+
+`django_async_backend.db.models.query.QuerySet` subclasses
+`django.db.models.QuerySet`, and `AsyncManager` subclasses `Manager`, so
+`isinstance()` checks in Django and third-party code (REST framework's
+related fields, django-filter, forms) take the queryset branch. The sync
+API that inheritance would re-expose (`get()`, `count()`, `exists()`,
+`delete()`, `update()`, `first()`, `iterator()`, ... and truth-testing,
+`len()`, `iter()`, pickling before evaluation) raises a `TypeError` naming
+the async twin instead of quietly running the query on the sync connection.
+
+### Caches
+
+`django_async_backend.core.cache.AsyncDatabaseCache` is Django's database
+cache backend with the `a*` methods implemented on the async connection
+(`INSERT ... ON CONFLICT` upserts, async culling); the sync methods and
+`createcachetable` are unchanged. Django's `BaseCache` implements every
+async method as a thread hop, so one native backend lifts everything built
+on the cache API:
+
+```python
+CACHES = {"default": {
+    "BACKEND": "django_async_backend.core.cache.AsyncDatabaseCache",
+    "LOCATION": "cache_table",
+}}
+SESSION_ENGINE = "django.contrib.sessions.backends.cache"   # or cached_db
+```
+
+- Django's cache and `cached_db` session stores are async by composition.
+- `{% cache %}` is rendered by the async template engine with `aget`/`aset`.
+- `django_async_backend.core.cache.acache_page(timeout)` and
+  `AsyncCacheMiddleware` are the async `cache_page()` / `CacheMiddleware`
+  (with `aget_cache_key()` / `alearn_cache_key()` for the header registry).
+- REST framework: `AsyncSimpleRateThrottle`, `AsyncAnonRateThrottle`,
+  `AsyncUserRateThrottle`, `AsyncScopedRateThrottle` await the cache.
+
+The rows live in the request's database and the operations run on its
+connection, so a cache write inside `async_atomic()` rolls back with the
+transaction, as Django's own `DatabaseCache` does under `ATOMIC_REQUESTS`.
+
 ### Finding what still runs synchronously
 
 Three settings make the remaining sync paths visible or forbidden:
@@ -438,6 +478,11 @@ Three settings make the remaining sync paths visible or forbidden:
   `ASYNC_BACKEND_SYNC_RECEIVER_CHECK` take `"warn"` (default), `"error"` or
   `"off"`. Django's own `AbstractBaseUser.save()` and `AbstractUser.clean()`
   overrides, and `authtoken.Token.save()`, get async twins from the backend.
+  `async_backend.W003` does the same for `AsyncModelAdmin` subclasses that
+  override `save_model()`, `delete_model()`, `save_formset()` or
+  `save_related()` instead of the `a`-prefixed hooks the async admin calls.
+- **`Model.aclean_fields()`** mirrors `clean_fields()` with the foreign-key
+  existence check on the async connection; `async_full_clean()` uses it.
 - **Sync receivers inside a transaction.** `Signal.asend()` runs a sync
   receiver in a worker thread on the sync connection, where it cannot see
   the uncommitted row it was told about. `ASYNC_BACKEND_SYNC_RECEIVERS`:

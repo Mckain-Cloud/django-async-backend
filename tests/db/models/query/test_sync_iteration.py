@@ -56,14 +56,9 @@ class TestSyncIterationGuard(AsyncioTestCase):
             obj in qs
 
     async def test_truthiness_raises(self):
-        """QuerySet has no __bool__, so truth-testing falls back to __len__."""
+        """Truth-testing is guarded like len() (Django's inherited __bool__
+        would evaluate the queryset synchronously)."""
         qs = TestModel.async_objects.all()
-
-        self.assertNotIn(
-            "__bool__",
-            type(qs).__dict__,
-            "A __bool__ of its own would shadow the __len__ guard",
-        )
 
         with self.assertRaisesRegex(
             TypeError, r"len\(\) is not supported on QuerySet"

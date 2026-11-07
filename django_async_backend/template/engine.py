@@ -740,7 +740,56 @@ async def _inclusion(node, context):
 
 
 # Order matters: subclasses before their bases.
+async def _cache_tag(node, context):
+    """``{% cache %}`` awaiting the fragment cache (``CacheNode``)."""
+    from django.core.cache import InvalidCacheBackendError, caches
+    from django.core.cache.utils import make_template_fragment_key
+    from django.template import TemplateSyntaxError, VariableDoesNotExist
+
+    try:
+        expire_time = await aresolve(node.expire_time_var, context)
+    except VariableDoesNotExist:
+        raise TemplateSyntaxError(
+            '"cache" tag got an unknown variable: %r' % node.expire_time_var.var
+        )
+    if expire_time is not None:
+        try:
+            expire_time = int(expire_time)
+        except (ValueError, TypeError):
+            raise TemplateSyntaxError(
+                '"cache" tag got a non-integer timeout value: %r' % expire_time
+            )
+    if node.cache_name:
+        try:
+            cache_name = await aresolve(node.cache_name, context)
+        except VariableDoesNotExist:
+            raise TemplateSyntaxError(
+                '"cache" tag got an unknown variable: %r' % node.cache_name.var
+            )
+        try:
+            fragment_cache = caches[cache_name]
+        except InvalidCacheBackendError:
+            raise TemplateSyntaxError(
+                "Invalid cache name specified for cache tag: %r" % cache_name
+            )
+    else:
+        try:
+            fragment_cache = caches["template_fragments"]
+        except InvalidCacheBackendError:
+            fragment_cache = caches["default"]
+    vary_on = [await aresolve(var, context) for var in node.vary_on]
+    cache_key = make_template_fragment_key(node.fragment_name, vary_on)
+    value = await fragment_cache.aget(cache_key)
+    if value is None:
+        value = await arender_nodelist(node.nodelist, context)
+        await fragment_cache.aset(cache_key, value, expire_time)
+    return value
+
+
+from django.templatetags.cache import CacheNode  # noqa: E402
+
 _RENDERERS = [
+    (CacheNode, _cache_tag),
     (TextNode, _text),
     (VariableNode, _variable),
     (defaulttags.ForNode, _for),
