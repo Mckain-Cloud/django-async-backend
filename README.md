@@ -368,6 +368,56 @@ implementing `async def aget_prefetch_querysets(self, instances, querysets)`
 (same six-tuple as Django's hook, with an async queryset) and in `afetch()`
 by implementing `async def aget_object(self, instance)`.
 
+### Django REST framework
+
+`django_async_backend.contrib.rest_framework` serves DRF viewsets on the
+request's async connection. It builds on [adrf](https://github.com/em1208/adrf)
+(async views, viewsets and routers) and replaces every place adrf still hops
+to a thread:
+
+```python
+from rest_framework import permissions
+from django_async_backend.contrib import rest_framework as arf
+
+class BookSerializer(arf.AsyncModelSerializer):
+    author_name = serializers.CharField(source="author.name", read_only=True)
+
+    class Meta:
+        model = Book
+        fields = ["id", "title", "author", "author_name", "tags"]
+
+class BookViewSet(arf.AsyncModelViewSet):
+    queryset = Book.objects.select_related("author").prefetch_related("tags")
+    serializer_class = BookSerializer
+    authentication_classes = [arf.AsyncSessionAuthentication]
+    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    pagination_class = arf.AsyncPageNumberPagination
+
+router = arf.DefaultRouter()
+router.register("books", BookViewSet)
+```
+
+- `AsyncModelSerializer`: `ais_valid()`, `adata`, `asave()`.
+  `PrimaryKeyRelatedField`/`SlugRelatedField` lookups, `UniqueValidator` and
+  `UniqueTogetherValidator` run on the async connection; relations a field
+  needs (`source="author.name"`, `StringRelatedField`, nested serializers,
+  many-to-many lists) are loaded with `afetch()` first; `acreate()` and
+  `aupdate()` use `async_objects` and `async_save()`. Hooks:
+  `avalidate_<field>()`, `avalidate()`, and `aget_<name>()` for a
+  `SerializerMethodField`.
+- `AsyncAPIView`/`AsyncGenericAPIView`: authentication through
+  `aauthenticate()` (`AsyncSessionAuthentication` uses `request.auser()`),
+  the user's permission cache is warmed so `DjangoModelPermissions` runs no
+  query, permissions and throttles are checked in the request's task, and
+  `aget_object()` uses `aget()`. Sync querysets on the view or field are
+  converted; sync authenticators that query fall back to a thread.
+- `AsyncPageNumberPagination` and `AsyncLimitOffsetPagination` count and
+  slice asynchronously; `AsyncModelViewSet`, `AsyncReadOnlyModelViewSet` and
+  the generic views mirror DRF's, registered with adrf's `DefaultRouter`.
+- Not covered: writable nested serializers (as in DRF), filter backends that
+  evaluate the queryset, the browsable API's `OPTIONS` metadata (it iterates
+  related querysets synchronously).
+
 ### Free-threaded Python
 
 The library and its test suite run on CPython 3.15t with the GIL disabled
