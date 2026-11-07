@@ -17,6 +17,7 @@ from django.http import JsonResponse
 
 from django_async_backend.contrib.admin.utils import PreparedPaginator
 from django_async_backend.db.models.convert import to_async_queryset
+from django_async_backend.db.models.fetch import aprepare_str
 
 
 class _DateHierarchyQuerySet:
@@ -204,6 +205,9 @@ class AsyncChangeList(ChangeList):
         model, or passed directly) is awaited here for every row and the
         entry is replaced by a sync stand-in that returns the stored value.
         """
+        if "__str__" in self.list_display:
+            # items_for_result() renders str(obj) for that column.
+            await aprepare_str(*self.result_list)
         prepared = []
         replaced = {}
         for entry in self.list_display:

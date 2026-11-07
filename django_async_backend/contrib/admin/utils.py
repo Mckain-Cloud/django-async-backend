@@ -15,6 +15,7 @@ from django.utils.html import format_html
 from django.utils.text import capfirst
 
 from django_async_backend.db.models.deletion import Collector
+from django_async_backend.db.models.fetch import aprepare_str
 
 
 class AsyncNestedObjects(Collector):
@@ -99,6 +100,11 @@ async def aget_deleted_objects(objs, request, admin_site):
         using = router.db_for_write(obj._meta.model)
     collector = AsyncNestedObjects(using=using, origin=objs)
     await collector.collect(objs)
+    # The format callback renders str(obj) for every collected object.
+    await aprepare_str(
+        *(o for model_objs in collector.model_objs.values() for o in model_objs),
+        *collector.protected,
+    )
     # The format callback asks each registered admin for a per-object delete
     # permission from sync code: compute those answers first.
     for model, model_objs in collector.model_objs.items():

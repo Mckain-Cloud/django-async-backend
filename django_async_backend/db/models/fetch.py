@@ -21,11 +21,67 @@ Custom descriptors can take part by defining
 
 from inspect import getattr_static
 
+from django.core.exceptions import SynchronousOnlyOperation
 from django.db.models.fields.related_descriptors import (
     ForwardManyToOneDescriptor,
     ReverseOneToOneDescriptor,
 )
 from django.db.models.query_utils import DeferredAttribute
+
+
+def forward_relation_names(model):
+    """Names of the model's forward FK / one-to-one fields (select_related-able)."""
+    return [
+        f.name
+        for f in model._meta.concrete_fields
+        if f.is_relation and (f.many_to_one or f.one_to_one)
+    ]
+
+
+def _uncached_forward_relations(obj):
+    return [
+        f.name
+        for f in obj._meta.concrete_fields
+        if f.is_relation
+        and (f.many_to_one or f.one_to_one)
+        and not f.is_cached(obj)
+    ]
+
+
+async def aprepare_str(*objs, depth=3):
+    """Make ``str(obj)`` safe to call from async code for each of ``objs``.
+
+    A ``__str__`` that reads a forward relation (``Permission`` reads
+    ``content_type``) lazy-loads it through the sync ORM, which raises
+    ``SynchronousOnlyOperation`` in a task. Try ``str()``; when it trips,
+    ``afetch()`` the instance's unfetched forward relations and try again,
+    following the relations it just loaded up to ``depth`` levels (a label
+    that reads ``obj.a.b``). A model whose label needs no relation costs one
+    ``str()`` call and no query.
+    """
+    for obj in objs:
+        if obj is None:
+            continue
+        frontier = [obj]
+        for _ in range(depth):
+            try:
+                str(obj)
+                break
+            except SynchronousOnlyOperation:
+                next_frontier = []
+                for o in frontier:
+                    names = _uncached_forward_relations(o)
+                    if not names:
+                        continue
+                    loaded = await o.afetch(*names)
+                    if len(names) == 1:
+                        loaded = [loaded]
+                    next_frontier.extend(v for v in loaded if v is not None)
+                if not next_frontier:
+                    raise
+                frontier = next_frontier
+        else:
+            str(obj)  # still failing: let the error through
 
 
 async def _fetch_forward(descriptor, instance):

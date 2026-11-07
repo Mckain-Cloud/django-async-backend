@@ -45,17 +45,11 @@ from django.forms.models import (
 )
 
 from django_async_backend.db.models.convert import to_async_queryset
+from django_async_backend.db.models.fetch import (
+    forward_relation_names as _forward_relation_names,
+)
 
 # --------------------------------------------------------------- fields ----
-
-
-def _forward_relation_names(model):
-    """Names of the model's forward FK / one-to-one fields (select_related-able)."""
-    return [
-        f.name
-        for f in model._meta.concrete_fields
-        if f.is_relation and (f.many_to_one or f.one_to_one)
-    ]
 
 
 class AsyncModelChoiceIterator(ModelChoiceIterator):

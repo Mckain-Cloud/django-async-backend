@@ -2,6 +2,7 @@
 
 import json
 
+from django_async_backend.db.models.fetch import aprepare_str
 from django_async_backend.utils.contenttypes import aget_for_model
 
 
@@ -16,6 +17,8 @@ async def alog_actions(
 
     if isinstance(change_message, list):
         change_message = json.dumps(change_message)
+    objs = list(objs)
+    await aprepare_str(*objs)  # object_repr
     entries = []
     for obj in objs:
         content_type = await aget_for_model(

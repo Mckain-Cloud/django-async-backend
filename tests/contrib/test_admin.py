@@ -12,6 +12,7 @@ from unittest import mock
 from asgiref.sync import sync_to_async
 from django.contrib.admin.models import LogEntry
 from django.contrib.auth import get_user_model
+from django.core.exceptions import SynchronousOnlyOperation
 from django.db import connections
 from django.db.backends.base.base import BaseDatabaseWrapper
 from django.test import AsyncClient
@@ -29,8 +30,14 @@ from django_async_backend.test import AsyncioTransactionTestCase
 User = get_user_model()
 
 
-class SyncQueryAttempted(AssertionError):
-    pass
+class SyncQueryAttempted(AssertionError, SynchronousOnlyOperation):
+    """Raised by the guard in place of a sync cursor.
+
+    Also a ``SynchronousOnlyOperation`` so the package's recovery paths (a
+    lazy relation read by ``str(obj)`` / ``label_from_instance()``) behave
+    under the guard as they do in production, where Django's async-context
+    check raises that before any cursor opens.
+    """
 
 
 @contextlib.contextmanager
@@ -237,6 +244,53 @@ class AsyncAdminTests(AsyncioTransactionTestCase):
             ).acount(),
             0,
         )
+
+    async def test_str_that_reads_a_relation(self):
+        """Permission.__str__ reads content_type on every page that shows it."""
+        from django.contrib.auth.models import Permission
+        from django.contrib.contenttypes.models import ContentType
+
+        await self._login()
+        ct = await ContentType.async_objects.aget(
+            app_label="test_app", model="selectrelatedbookmodel"
+        )
+        perm = await Permission.async_objects.acreate(
+            codename="zap_book", name="Can zap book", content_type=ct
+        )
+        label = "Test_App | select related book model | Can zap book"
+        base = "/admin/auth/permission/"
+        with no_sync_queries():
+            r = await self.client.get(base + "?q=zap_book")
+            self.assertEqual(r.status_code, 200)
+            self.assertIn(label, r.content.decode())
+            r = await self.client.get("%s%s/change/" % (base, perm.pk))
+            self.assertEqual(r.status_code, 200)
+            self.assertIn(label, r.content.decode())
+            r = await self.client.post(
+                "%s%s/change/" % (base, perm.pk),
+                {
+                    "name": "Can zap a book",
+                    "content_type": ct.pk,
+                    "codename": "zap_book",
+                    "_save": "Save",
+                },
+            )
+            self.assertEqual(r.status_code, 302)
+            r = await self.client.get("%s%s/history/" % (base, perm.pk))
+            self.assertEqual(r.status_code, 200)
+            self.assertIn("Can zap a book", r.content.decode())
+            r = await self.client.get("%s%s/delete/" % (base, perm.pk))
+            self.assertEqual(r.status_code, 200)
+            self.assertIn("Can zap a book", r.content.decode())
+            r = await self.client.post("%s%s/delete/" % (base, perm.pk), {"post": "yes"})
+            self.assertEqual(r.status_code, 302)
+        reprs = [
+            e.object_repr
+            async for e in LogEntry.async_objects.filter(object_id=str(perm.pk))
+        ]
+        self.assertEqual(len(reprs), 2, reprs)
+        self.assertTrue(all(r.endswith("| Can zap a book") for r in reprs), reprs)
+        self.assertFalse(await Permission.async_objects.filter(pk=perm.pk).aexists())
 
     async def test_validation_errors_are_rendered(self):
         await self._login()

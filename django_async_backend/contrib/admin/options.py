@@ -87,6 +87,7 @@ from django_async_backend.contrib.admin.utils import (
     aget_deleted_objects,
 )
 from django_async_backend.contrib.admin.views import AsyncChangeList
+from django_async_backend.db.models.fetch import aprepare_str
 from django_async_backend.db.transaction import async_atomic
 from django_async_backend.forms import (
     AsyncBaseGenericInlineFormSet,
@@ -213,9 +214,11 @@ class AsyncBaseModelAdminMixin(AsyncPermissionsMixin):
 
     async def aprepare_for_render(self, request, obj, readonly_fields=None):
         """Load what the templates would otherwise fetch lazily: relations
-        among the readonly fields and many-to-many initial data."""
+        among the readonly fields, many-to-many initial data, and whatever
+        ``str(obj)`` reads (the page title and subtitle)."""
         if obj is None or obj._state.adding:
             return
+        await aprepare_str(obj)
         if readonly_fields is None:
             readonly_fields = self.get_readonly_fields(request, obj)
         names = []
@@ -861,6 +864,8 @@ class AsyncModelAdmin(AsyncBaseModelAdminMixin, ModelAdmin):
             if formsets_valid and form_validated:
                 await self.asave_model(request, new_object, form, not add)
                 await self.asave_related(request, form, formsets, not add)
+                # response_add()/response_change() and the log entry use str(obj).
+                await aprepare_str(new_object)
                 change_message = self.construct_change_message(
                     request, form, formsets, add
                 )
@@ -888,6 +893,10 @@ class AsyncModelAdmin(AsyncBaseModelAdminMixin, ModelAdmin):
         await form.aload_choices()
         for formset in formsets:
             await formset.aload()
+            # Inline headers render str(original) for the existing rows.
+            await aprepare_str(
+                *(f.instance for f in formset.forms if not f.instance._state.adding)
+            )
 
         if not add and not self.has_change_permission(request, obj):
             readonly_fields = flatten_fieldsets(fieldsets)
@@ -994,6 +1003,7 @@ class AsyncModelAdmin(AsyncBaseModelAdminMixin, ModelAdmin):
             perms_needed,
             protected,
         ) = await self.aget_deleted_objects([obj], request)
+        await aprepare_str(obj)
 
         if request.POST and not protected:
             if perms_needed:
@@ -1067,6 +1077,7 @@ class AsyncModelAdmin(AsyncBaseModelAdminMixin, ModelAdmin):
             page_obj = paginator.page(1)
         page_obj.object_list = [obj async for obj in page_obj.object_list]
         page_range = paginator.get_elided_page_range(page_obj.number)
+        await aprepare_str(obj)
 
         context = {
             **self.admin_site.each_context(request),

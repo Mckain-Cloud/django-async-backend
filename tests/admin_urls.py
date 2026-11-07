@@ -109,6 +109,18 @@ class OwnerAdmin(AsyncModelAdmin):
 site.register(M2MTagModel)
 
 
+# Permission.__str__ reads content_type: every admin page that renders str(obj)
+# (changelist __str__ column, change/history titles, delete confirmation, log
+# entries) must fetch it on the async connection first.
+from django.contrib.auth.models import Permission  # noqa: E402
+
+
+@register(Permission, site=site)
+class PermissionAdmin(AsyncModelAdmin):
+    list_display = ["__str__", "codename"]
+    search_fields = ["codename"]
+
+
 @register(TestModel, site=site)
 class TestModelAdmin(AsyncModelAdmin):
     list_display = ["name", "value", "relative"]

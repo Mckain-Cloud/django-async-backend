@@ -305,6 +305,10 @@ request under a guard that fails on any synchronous cursor. Templates are
 still rendered synchronously (in the view's task) from pre-evaluated context,
 so a lazy query inside a template raises instead of running on a thread.
 `date_hierarchy` and facet counts are precomputed by the async changelist.
+Wherever the admin renders `str(obj)` (the `__str__` changelist column, page
+titles, inline headers, delete confirmations, messages and log entries) a
+`__str__` that reads a relation is handled by `aprepare_str()`, which fetches
+the unfetched forward relations on the async connection first.
 Custom list filters subclass `AsyncSimpleListFilter` and implement
 `alookups()`. Generic relations are covered too: `instance.<generic
 relation>.async_objects` managers, `afetch()` of a `GenericForeignKey`, and
