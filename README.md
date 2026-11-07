@@ -425,6 +425,47 @@ router.register("books", BookViewSet)
   `Field._creation_counter += 1` per field instance is a smaller version of
   the same problem.
 
+### Finding what still runs synchronously
+
+Three settings make the remaining sync paths visible or forbidden:
+
+- **System checks.** `async_backend.W001`: a model overrides `save()`,
+  `delete()` or `clean()` without `async_save()`, `async_delete()` or
+  `aclean()`; the async methods are generated from Django's bodies and skip
+  the sync override. `async_backend.W002`: a sync receiver is connected to a
+  request-time signal (`pre_save`, `post_save`, `pre_delete`, `post_delete`,
+  `m2m_changed`, the auth login signals). `ASYNC_BACKEND_OVERRIDE_CHECK` and
+  `ASYNC_BACKEND_SYNC_RECEIVER_CHECK` take `"warn"` (default), `"error"` or
+  `"off"`. Django's own `AbstractBaseUser.save()` and `AbstractUser.clean()`
+  overrides, and `authtoken.Token.save()`, get async twins from the backend.
+- **Sync receivers inside a transaction.** `Signal.asend()` runs a sync
+  receiver in a worker thread on the sync connection, where it cannot see
+  the uncommitted row it was told about. `ASYNC_BACKEND_SYNC_RECEIVERS`:
+  `"warn"` (default) emits `SyncReceiverWarning` once per receiver fired
+  inside `async_atomic()`, `"error"` raises `SyncReceiverInTransaction`,
+  `"thread"` keeps Django's behaviour quietly. Make the receiver `async def`
+  and it runs in the sender's task instead.
+- **Any sync ORM hop.** `ASYNC_BACKEND_SYNC_HOPS = "warn"` logs, once per
+  call site with the application frames of its stack, every sync database
+  cursor opened in a `sync_to_async()` thread while an event loop drives the
+  request (logger `django_async_backend.hops`); `"error"` raises
+  `SyncHopError` there. Default `"off"`.
+- **Template tags that query.** A `simple_tag`, `inclusion_tag` or custom
+  node whose own code hits the sync ORM is run in a worker thread with an
+  `AsyncTemplateHopWarning` once per node class;
+  `ASYNC_BACKEND_TEMPLATE_SYNC_NODES = "error"` re-raises instead.
+
+For REST framework the sync fallbacks have async replacements:
+`AsyncBasicAuthentication`, `AsyncTokenAuthentication`,
+`AsyncRemoteUserAuthentication`, `AsyncDjangoModelPermissions` and
+`AsyncDjangoObjectPermissions` (object-level checks through
+`user.ahas_perms(perms, obj)`, so a backend with `ahas_perm()` runs on the
+request's connection). `django_async_backend.contrib.django_filters` provides
+`AsyncFilterSet`, `AsyncModelChoiceFilter`, `AsyncModelMultipleChoiceFilter`
+and `AsyncDjangoFilterBackend` (`filterset_class` or `filterset_fields` as
+usual; the related-field validation and the filtering run asynchronously).
+`django_async_backend.forms.AsyncForm` gives a plain form `ais_valid()`.
+
 ### Free-threaded Python
 
 The library and its test suite run on CPython 3.15t with the GIL disabled

@@ -167,8 +167,60 @@ class OwnerViewSet(arf.AsyncModelViewSet):
     pagination_class.default_limit = 5
 
 
+class BookObjectPermViewSet(arf.AsyncModelViewSet):
+    """Basic auth + object permissions through the backends' async API."""
+
+    queryset = SelectRelatedBookModel.objects.select_related("author").order_by("pk")
+    serializer_class = BookSerializer
+    authentication_classes = [arf.AsyncBasicAuthentication]
+    permission_classes = [arf.AsyncDjangoObjectPermissions]
+    pagination_class = arf.AsyncPageNumberPagination
+
+
+class BookTokenViewSet(arf.AsyncReadOnlyModelViewSet):
+    queryset = SelectRelatedBookModel.objects.select_related("author").order_by("pk")
+    serializer_class = BookSerializer
+    authentication_classes = [arf.AsyncTokenAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = None
+
+
+from django_filters import CharFilter  # noqa: E402
+
+from django_async_backend.contrib import django_filters as adf  # noqa: E402
+
+
+class BookFilterSet(adf.AsyncFilterSet):
+    title = CharFilter(lookup_expr="icontains")
+
+    class Meta:
+        model = SelectRelatedBookModel
+        fields = ["author", "publisher", "title"]
+
+
+class BookFilteredViewSet(arf.AsyncReadOnlyModelViewSet):
+    queryset = SelectRelatedBookModel.objects.select_related("author").order_by("pk")
+    serializer_class = BookSerializer
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+    pagination_class = arf.AsyncPageNumberPagination
+    filter_backends = [adf.AsyncDjangoFilterBackend]
+    filterset_class = BookFilterSet
+
+
+class BookAutoFilteredViewSet(BookFilteredViewSet):
+    filterset_class = None
+    filterset_fields = ["author", "publisher"]
+
+
 router = arf.DefaultRouter()
 router.register("books", BookViewSet, basename="book")
 router.register("owners", OwnerViewSet, basename="owner")
+router.register("objperm-books", BookObjectPermViewSet, basename="objperm-book")
+router.register("token-books", BookTokenViewSet, basename="token-book")
+router.register("filtered-books", BookFilteredViewSet, basename="filtered-book")
+router.register(
+    "autofiltered-books", BookAutoFilteredViewSet, basename="autofiltered-book"
+)
 
 urlpatterns = [path("admin/", site.urls), path("api/", include(router.urls))]

@@ -29,6 +29,8 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django_async_backend",
     "rest_framework",
+    "rest_framework.authtoken",
+    "django_filters",
     "test_app",
 ]
 

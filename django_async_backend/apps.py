@@ -30,6 +30,10 @@ class DjangoAsyncBackendConfig(AppConfig):
         _patch_model()
         check_middleware()
 
+        from django_async_backend import checks
+
+        checks.register()
+
         if getattr(
             settings, "ASYNC_BACKEND_SEQUENTIAL_SIGNAL_RECEIVERS", True
         ):
@@ -44,7 +48,19 @@ class DjangoAsyncBackendConfig(AppConfig):
 
             patch_template_resolve()
 
+        from django_async_backend.contrib.auth import (
+            patch_token_async_save,
+            patch_user_async_save,
+        )
+
+        patch_user_async_save()
+        patch_token_async_save()
+
         if getattr(settings, "ASYNC_BACKEND_ASYNC_LAST_LOGIN", False):
             from django_async_backend.contrib.auth import patch_last_login
 
             patch_last_login()
+
+        from django_async_backend import hops
+
+        hops.install(getattr(settings, "ASYNC_BACKEND_SYNC_HOPS", "off"))

@@ -6,14 +6,83 @@ from django.dispatch import (
 )
 from test_app.models import TestModel
 
+from django.db.models.signals import post_save
+from django.test import override_settings
+
 from django_async_backend.db.transaction import async_atomic
 from django_async_backend.dispatch import (
+    SyncReceiverInTransaction,
+    SyncReceiverWarning,
     _original_run_parallel,
     is_sequential,
     patch_signal_dispatch,
     unpatch_signal_dispatch,
 )
-from django_async_backend.test import AsyncioTestCase
+from django_async_backend.test import (
+    AsyncioTestCase,
+    AsyncioTransactionTestCase,
+)
+
+
+class SyncReceiverPolicyTests(AsyncioTransactionTestCase):
+    # A TransactionTestCase: AsyncioTestCase wraps each test in a transaction,
+    # which is exactly what the policy looks for.
+
+    def _connect(self, name):
+        calls = []
+
+        def receiver(sender, **kwargs):
+            calls.append(kwargs["instance"].name)
+
+        receiver.__qualname__ = name
+        post_save.connect(receiver, sender=TestModel, dispatch_uid=name, weak=False)
+        self.addCleanup(post_save.disconnect, dispatch_uid=name, sender=TestModel)
+        return calls
+
+    async def asyncTearDown(self):
+        from tests.contrib.test_admin import _close_sync_connections
+
+        await _close_sync_connections()
+        await TestModel.async_objects.all().adelete()
+
+    async def test_warn_once_inside_async_atomic(self):
+        calls = self._connect("policy_warn_receiver")
+        with self.assertWarns(SyncReceiverWarning) as cm:
+            async with async_atomic():
+                await TestModel.async_objects.acreate(name="w1", value=1)
+                await TestModel.async_objects.acreate(name="w2", value=1)
+        self.assertIn("policy_warn_receiver", str(cm.warning))
+        self.assertIn("outside the async transaction", str(cm.warning))
+        # The receiver still ran (in a thread), both times.
+        self.assertEqual(calls, ["w1", "w2"])
+
+    @override_settings(ASYNC_BACKEND_SYNC_RECEIVERS="error")
+    async def test_error_policy(self):
+        self._connect("policy_error_receiver")
+        with self.assertRaises(SyncReceiverInTransaction):
+            async with async_atomic():
+                await TestModel.async_objects.acreate(name="e1", value=1)
+
+    @override_settings(ASYNC_BACKEND_SYNC_RECEIVERS="thread")
+    async def test_thread_policy_is_quiet(self):
+        import warnings
+
+        calls = self._connect("policy_thread_receiver")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            async with async_atomic():
+                await TestModel.async_objects.acreate(name="t1", value=1)
+        self.assertFalse([w for w in caught if issubclass(w.category, SyncReceiverWarning)])
+        self.assertEqual(calls, ["t1"])
+
+    async def test_outside_a_transaction_is_quiet(self):
+        import warnings
+
+        self._connect("policy_outside_receiver")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            await TestModel.async_objects.acreate(name="o1", value=1)
+        self.assertFalse([w for w in caught if issubclass(w.category, SyncReceiverWarning)])
 
 
 class SequentialSignalDispatchTests(AsyncioTestCase):

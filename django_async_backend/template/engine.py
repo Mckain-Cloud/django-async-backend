@@ -24,8 +24,11 @@ covers every tag that does not introduce variables for a child nodelist.
 """
 
 import inspect
+import warnings
 from contextlib import asynccontextmanager
 
+from asgiref.sync import sync_to_async
+from django.conf import settings
 from django.core.exceptions import SynchronousOnlyOperation
 from django.db.models.manager import BaseManager
 from django.template import (
@@ -304,10 +307,44 @@ def _clear(context, ids):
         store.pop(i, None)
 
 
+class AsyncTemplateHopWarning(RuntimeWarning):
+    """A template node queried the sync ORM and was rendered in a thread."""
+
+
+_hopped_node_types = set()
+
+
+async def _hop_sync_node(node, fn, *args, **kwargs):
+    """A node's own code queried the sync ORM (a third-party tag without an
+    ``arender()``). Policy ``ASYNC_BACKEND_TEMPLATE_SYNC_NODES``: ``"hop"``
+    (default) runs it in a worker thread on the sync connection and warns
+    once per node class; ``"error"`` re-raises ``SynchronousOnlyOperation``.
+    """
+    policy = getattr(settings, "ASYNC_BACKEND_TEMPLATE_SYNC_NODES", "hop")
+    if policy != "hop":
+        raise
+    key = type(node)
+    label = getattr(getattr(node, "func", None), "__name__", None) or key.__qualname__
+    if key not in _hopped_node_types:
+        _hopped_node_types.add(key)
+        warnings.warn(
+            "Template node %s.%s (%s) queries the database synchronously; it "
+            "was run in a worker thread on the sync connection. Make the tag "
+            "`async def`, give the node an `async def arender(self, context)`, "
+            "or set ASYNC_BACKEND_TEMPLATE_SYNC_NODES = 'error'."
+            % (key.__module__, key.__qualname__, label),
+            AsyncTemplateHopWarning,
+            stacklevel=3,
+        )
+    return await sync_to_async(fn)(*args, **kwargs)
+
+
 async def _arender_fallback(node, context):
     ids = await _apreresolve_node(node, context)
     try:
         return node.render(context)
+    except SynchronousOnlyOperation:
+        return await _hop_sync_node(node, node.render, context)
     finally:
         _clear(context, ids)
 
@@ -634,7 +671,12 @@ async def _simple(node, context):
     resolved_args, resolved_kwargs = await _resolved_arguments(
         node, context, block_content
     )
-    output = node.func(*resolved_args, **resolved_kwargs)
+    try:
+        output = node.func(*resolved_args, **resolved_kwargs)
+    except SynchronousOnlyOperation:
+        output = await _hop_sync_node(
+            node, node.func, *resolved_args, **resolved_kwargs
+        )
     if inspect.isawaitable(output):
         output = await output
     if node.target_var is not None:
@@ -651,7 +693,12 @@ async def _inclusion(node, context):
     from django.template.base import Template
 
     resolved_args, resolved_kwargs = await _resolved_arguments(node, context)
-    _dict = node.func(*resolved_args, **resolved_kwargs)
+    try:
+        _dict = node.func(*resolved_args, **resolved_kwargs)
+    except SynchronousOnlyOperation:
+        _dict = await _hop_sync_node(
+            node, node.func, *resolved_args, **resolved_kwargs
+        )
     if inspect.isawaitable(_dict):
         _dict = await _dict
     t = context.render_context.get(node)

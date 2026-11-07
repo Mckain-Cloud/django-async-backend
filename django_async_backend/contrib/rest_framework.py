@@ -28,10 +28,13 @@ Register viewsets with adrf's ``DefaultRouter``/``SimpleRouter`` (re-exported
 here); they map the ``alist``/``acreate``/... actions.
 """
 
+import base64
+import binascii
 from collections.abc import Mapping
 from inspect import iscoroutinefunction
 
 from asgiref.sync import sync_to_async
+from django.contrib.auth import aauthenticate, get_user_model
 from django.core.exceptions import FieldDoesNotExist, ObjectDoesNotExist
 from django.core.exceptions import SynchronousOnlyOperation
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -43,8 +46,9 @@ from django.db.models import QuerySet as DjangoQuerySet
 from django.db.models.fields.related import RelatedField as ModelRelatedField
 from django.db.models.manager import BaseManager
 from django.http import Http404
-from rest_framework import authentication, exceptions, pagination, relations
-from rest_framework import status
+from django.utils.translation import gettext_lazy as _
+from rest_framework import authentication, exceptions, pagination, permissions
+from rest_framework import relations, status
 from rest_framework.exceptions import ValidationError
 from rest_framework.fields import SerializerMethodField, SkipField, empty
 from rest_framework.fields import get_error_detail
@@ -78,6 +82,11 @@ from django_async_backend.db.models.query import QuerySet as AsyncQuerySet
 
 __all__ = [
     "AsyncAPIView",
+    "AsyncBasicAuthentication",
+    "AsyncDjangoModelPermissions",
+    "AsyncDjangoObjectPermissions",
+    "AsyncRemoteUserAuthentication",
+    "AsyncTokenAuthentication",
     "AsyncCreateAPIView",
     "AsyncDestroyAPIView",
     "AsyncGenericAPIView",
@@ -124,7 +133,7 @@ async def aiterate(data):
     query: cached results are reused, a sync queryset is converted."""
     if isinstance(data, BaseManager):
         data = data.all()
-    if isinstance(data, DjangoQuerySet):
+    if isinstance(data, (DjangoQuerySet, AsyncQuerySet)):
         if data._result_cache is not None:
             return list(data._result_cache)
         data = to_async_queryset(data)
@@ -667,6 +676,146 @@ class AsyncSessionAuthentication(authentication.SessionAuthentication):
         return (user, None)
 
 
+class AsyncBasicAuthentication(authentication.BasicAuthentication):
+    async def aauthenticate(self, request):
+        auth = authentication.get_authorization_header(request).split()
+        if not auth or auth[0].lower() != b"basic":
+            return None
+        if len(auth) == 1:
+            raise exceptions.AuthenticationFailed(
+                _("Invalid basic header. No credentials provided.")
+            )
+        if len(auth) > 2:
+            raise exceptions.AuthenticationFailed(
+                _("Invalid basic header. Credentials string should not contain spaces.")
+            )
+        try:
+            try:
+                decoded = base64.b64decode(auth[1]).decode("utf-8")
+            except UnicodeDecodeError:
+                decoded = base64.b64decode(auth[1]).decode("latin-1")
+            userid, password = decoded.split(":", 1)
+        except (TypeError, ValueError, UnicodeDecodeError, binascii.Error):
+            raise exceptions.AuthenticationFailed(
+                _("Invalid basic header. Credentials not correctly base64 encoded.")
+            )
+        return await self.aauthenticate_credentials(userid, password, request)
+
+    async def aauthenticate_credentials(self, userid, password, request=None):
+        credentials = {
+            get_user_model().USERNAME_FIELD: userid,
+            "password": password,
+        }
+        user = await aauthenticate(request=request, **credentials)
+        if user is None:
+            raise exceptions.AuthenticationFailed(_("Invalid username/password."))
+        if not user.is_active:
+            raise exceptions.AuthenticationFailed(_("User inactive or deleted."))
+        return (user, None)
+
+
+class AsyncTokenAuthentication(authentication.TokenAuthentication):
+    """``TokenAuthentication`` looking the token up with ``aget()``.
+
+    Requires ``rest_framework.authtoken`` in ``INSTALLED_APPS``.
+    """
+
+    async def aauthenticate(self, request):
+        auth = authentication.get_authorization_header(request).split()
+        if not auth or auth[0].lower() != self.keyword.lower().encode():
+            return None
+        if len(auth) == 1:
+            raise exceptions.AuthenticationFailed(
+                _("Invalid token header. No credentials provided.")
+            )
+        if len(auth) > 2:
+            raise exceptions.AuthenticationFailed(
+                _("Invalid token header. Token string should not contain spaces.")
+            )
+        try:
+            token = auth[1].decode()
+        except UnicodeError:
+            raise exceptions.AuthenticationFailed(
+                _("Invalid token header. Token string should not contain invalid characters.")
+            )
+        return await self.aauthenticate_credentials(token)
+
+    async def aauthenticate_credentials(self, key):
+        model = self.get_model()
+        try:
+            token = await model.async_objects.select_related("user").aget(key=key)
+        except model.DoesNotExist:
+            raise exceptions.AuthenticationFailed(_("Invalid token."))
+        if not token.user.is_active:
+            raise exceptions.AuthenticationFailed(_("User inactive or deleted."))
+        return (token.user, token)
+
+
+class AsyncRemoteUserAuthentication(authentication.RemoteUserAuthentication):
+    async def aauthenticate(self, request):
+        auser = getattr(request._request, "auser", None)
+        user = await auser() if auser is not None else getattr(request._request, "user", None)
+        if user and user.is_active:
+            return (user, None)
+        return None
+
+
+class AsyncDjangoModelPermissions(permissions.DjangoModelPermissions):
+    """``DjangoModelPermissions`` through ``user.ahas_perms()``."""
+
+    async def has_permission(self, request, view):
+        if not request.user or (
+            not request.user.is_authenticated and self.authenticated_users_only
+        ):
+            return False
+        if getattr(view, "_ignore_model_permissions", False):
+            return True
+        queryset = self._queryset(view)
+        perms = self.get_required_permissions(request.method, queryset.model)
+        return await _ahas_perms(request.user, perms)
+
+
+class AsyncDjangoObjectPermissions(permissions.DjangoObjectPermissions):
+    """``DjangoObjectPermissions`` through ``user.ahas_perms(perms, obj)``.
+
+    An object-permission backend implementing ``ahas_perm()`` runs on the
+    request's connection; one with only ``has_perm()`` is reached through
+    Django's thread hop.
+    """
+
+    async def has_permission(self, request, view):
+        if not request.user or (
+            not request.user.is_authenticated and self.authenticated_users_only
+        ):
+            return False
+        if getattr(view, "_ignore_model_permissions", False):
+            return True
+        queryset = self._queryset(view)
+        perms = self.get_required_permissions(request.method, queryset.model)
+        return await _ahas_perms(request.user, perms)
+
+    async def has_object_permission(self, request, view, obj):
+        queryset = self._queryset(view)
+        model_cls = queryset.model
+        user = request.user
+        perms = self.get_required_object_permissions(request.method, model_cls)
+        if not await _ahas_perms(user, perms, obj):
+            if request.method in permissions.SAFE_METHODS:
+                raise Http404
+            read_perms = self.get_required_object_permissions("GET", model_cls)
+            if not await _ahas_perms(user, read_perms, obj):
+                raise Http404
+            return False
+        return True
+
+
+async def _ahas_perms(user, perms, obj=None):
+    ahas = getattr(user, "ahas_perms", None)
+    if ahas is not None:
+        return await ahas(perms, obj)
+    return await sync_to_async(user.has_perms)(perms, obj)
+
+
 class AsyncRequest(AdrfAsyncRequest):
     async def aauthenticate(self):
         """Authenticate once, preferring ``aauthenticate()`` on each
@@ -787,7 +936,12 @@ class AsyncAPIView(adrf_views.APIView):
 
 class AsyncGenericAPIView(AsyncAPIView, adrf_generics.GenericAPIView):
     def get_queryset(self):
-        return to_async(super().get_queryset())
+        queryset = super().get_queryset()
+        if isinstance(queryset, AsyncQuerySet):
+            # DRF re-evaluates a sync class attribute with .all(); do the
+            # same for an async one so requests never share a result cache.
+            queryset = queryset.all()
+        return to_async(queryset)
 
     async def aget_object(self):
         queryset = await self.afilter_queryset(self.get_queryset())

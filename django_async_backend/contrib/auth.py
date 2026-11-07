@@ -96,6 +96,84 @@ class AsyncModelBackend(ModelBackend):
         return UserModel.async_objects.filter(pk__in=queryset.values("pk"))
 
 
+def patch_user_async_save():
+    """Give ``AbstractBaseUser`` the async twin of its ``save()`` override.
+
+    Django's ``AbstractBaseUser.save()`` fires
+    ``password_validation.password_changed()`` and clears the plain-text
+    password after saving. The generated ``async_save()`` comes from
+    ``Model.save`` and would skip that; mirror it here so the override check
+    (``async_backend.W001``) is satisfied for the user model.
+    """
+    from django.contrib.auth import password_validation
+    from django.contrib.auth.base_user import AbstractBaseUser
+
+    if "async_save" in vars(AbstractBaseUser):
+        return
+
+    async def async_save(self, *args, **kwargs):
+        await super(AbstractBaseUser, self).async_save(*args, **kwargs)
+        if self._password is not None:
+            password_validation.password_changed(self._password, self)
+            self._password = None
+
+    async_save.__qualname__ = "AbstractBaseUser.async_save"
+    AbstractBaseUser.async_save = async_save
+
+    # AbstractUser.clean() normalises the e-mail address: no query, so the
+    # async twin can simply call it.
+    from django.contrib.auth.models import AbstractUser
+
+    if "aclean" not in vars(AbstractUser):
+
+        async def aclean(self):
+            return self.clean()
+
+        aclean.__qualname__ = "AbstractUser.aclean"
+        AbstractUser.aclean = aclean
+
+
+def patch_token_async_save():
+    """Async twins for ``rest_framework.authtoken`` model overrides.
+
+    ``Token.save()`` generates the key; ``TokenProxy.delete()`` deletes
+    through the concrete ``Token`` because the proxy maps ``pk`` to the user
+    id. No-op when the app is not installed.
+    """
+    try:
+        from rest_framework.authtoken.models import Token, TokenProxy
+    except Exception:  # pragma: no cover - app not installed / importable
+        return
+
+    if "async_save" not in vars(Token):
+
+        async def async_save(self, *args, **kwargs):
+            if not self.key:
+                self.key = self.generate_key()
+            return await super(Token, self).async_save(*args, **kwargs)
+
+        async_save.__qualname__ = "Token.async_save"
+        Token.async_save = async_save
+
+    if "async_delete" not in vars(TokenProxy):
+
+        async def async_delete(self, using=None, keep_parents=False):
+            from django.db import router
+
+            if self.key is None:
+                raise ValueError(
+                    "%s object can't be deleted because its %s attribute is "
+                    "set to None." % (self._meta.object_name, self._meta.pk.attname)
+                )
+            using = using or router.db_for_write(self.__class__, instance=self)
+            deleted = await Token.async_objects.using(using).filter(key=self.key).adelete()
+            self.key = None
+            return deleted
+
+        async_delete.__qualname__ = "TokenProxy.async_delete"
+        TokenProxy.async_delete = async_delete
+
+
 async def awarm_permissions(user):
     """Load the user's permissions on the async connection.
 

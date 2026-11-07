@@ -37,3 +37,9 @@ async def books_of(author):
 @register.filter
 def double(value):
     return value * 2
+
+
+@register.simple_tag
+def sync_book_count(author):
+    """A third-party-style tag: queries the sync ORM in render()."""
+    return SelectRelatedBookModel.objects.filter(author=author).count()

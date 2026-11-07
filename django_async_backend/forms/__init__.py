@@ -1,3 +1,4 @@
+from django_async_backend.forms.forms import AsyncForm, AsyncFormMixin
 from django_async_backend.forms.models import (
     AsyncBaseGenericInlineFormSet,
     AsyncBaseInlineFormSet,
@@ -13,6 +14,8 @@ from django_async_backend.forms.models import (
 )
 
 __all__ = [
+    "AsyncForm",
+    "AsyncFormMixin",
     "AsyncBaseGenericInlineFormSet",
     "AsyncBaseInlineFormSet",
     "AsyncBaseModelFormSet",
