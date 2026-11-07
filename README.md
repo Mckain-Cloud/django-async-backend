@@ -279,6 +279,10 @@ inside `async_atomic()`, receivers that touch the database must be `async`.
 factories. Validation (`ais_valid()`, unique and constraint checks), saving
 (`asave()`, `asave_m2m()`) and choice loading (`aload_choices()`) run on the
 async connection; the sync methods keep working for sync views.
+`aload_choices()` also labels the rows ahead of rendering: when
+`label_from_instance()` reads an unfetched relation (`Permission.__str__`
+reads `content_type`), the rows are reloaded once with their forward
+relations joined instead of lazy-loading inside the widget.
 
 ### Admin, auth, sessions, messages
 

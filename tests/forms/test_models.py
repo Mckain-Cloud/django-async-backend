@@ -32,6 +32,72 @@ OwnerForm = async_modelform_factory(M2MOwnerModel, fields=["name", "tags"])
 TestForm = async_modelform_factory(TestModel, fields=["name", "value"])
 
 
+class AsyncModelChoiceLabelTests(AsyncioTestCase):
+    """``label_from_instance()`` that reads a relation.
+
+    ``Permission.__str__`` reads ``content_type``; labelling the choices while
+    a widget renders would lazy-load it on the sync connection (or raise
+    ``SynchronousOnlyOperation`` in an async request). ``aload_choices()``
+    labels the rows ahead of time and reloads them with the relation joined
+    when a label needs it.
+    """
+
+    async def test_single_choice_labels_fetch_relations_natively(self):
+        from django import forms
+        from django.contrib.auth.models import Permission
+
+        from tests.contrib.test_admin import no_sync_queries
+
+        class PermissionForm(forms.Form):
+            perm = AsyncModelChoiceField(queryset=Permission.async_objects.all())
+
+        form = PermissionForm()
+        # The first labelling attempt trips Django's own async-context guard
+        # (SynchronousOnlyOperation) and triggers the joined reload.
+        async with AsyncCaptureQueriesContext(
+            async_connections[DEFAULT_DB_ALIAS]
+        ) as ctx:
+            rows = await form.fields["perm"].aload_choices()
+        self.assertEqual(len(ctx.captured_queries), 2)
+        self.assertTrue(rows)
+        # Rendering and labelling again need no query of either kind.
+        with no_sync_queries():
+            async with self.assertNumQueries(0):
+                html = str(form["perm"])
+                labels = [str(obj) for obj in rows]
+        # Permission.__str__ = "<content type> | <name>", content type = app label.
+        self.assertIn("Authorization | user | Can add user", html)
+        self.assertIn("Authorization | user | Can add user", labels[0] if False else " ".join(labels))
+
+    async def test_multiple_choice_labels_fetch_relations_natively(self):
+        from django import forms
+        from django.contrib.auth.models import Permission
+
+        from tests.contrib.test_admin import no_sync_queries
+
+        class PermissionsForm(forms.Form):
+            perms = AsyncModelMultipleChoiceField(
+                queryset=Permission.async_objects.all()
+            )
+
+        form = PermissionsForm()
+        await form.fields["perms"].aload_choices()
+        with no_sync_queries():
+            async with self.assertNumQueries(0):
+                html = str(form["perms"])
+        self.assertIn("Authorization | user | Can change user", html)
+
+    async def test_labels_without_relations_need_no_reload(self):
+        author = await SelectRelatedAuthorModel.async_objects.acreate(name="a")
+        form = BookForm()
+        async with self.assertNumQueries(1):
+            await form.fields["author"].aload_choices()
+        self.assertEqual(
+            form.fields["author"]._async_labels,
+            ["SelectRelatedAuthorModel object (%s)" % author.pk],
+        )
+
+
 class AsyncModelFormTests(AsyncioTestCase):
     async def asyncSetUp(self):
         self.author = await SelectRelatedAuthorModel.async_objects.acreate(

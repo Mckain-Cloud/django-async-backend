@@ -23,7 +23,7 @@ class can serve both.
 from itertools import chain
 
 from django import forms
-from django.core.exceptions import ValidationError
+from django.core.exceptions import SynchronousOnlyOperation, ValidationError
 from django.db import models
 from django.forms.formsets import DELETION_FIELD_NAME
 from django.forms.models import (
@@ -32,6 +32,7 @@ from django.forms.models import (
     InlineForeignKeyField,
     ModelChoiceField,
     ModelChoiceIterator,
+    ModelChoiceIteratorValue,
     ModelForm,
     ModelMultipleChoiceField,
     construct_instance,
@@ -46,6 +47,15 @@ from django.forms.models import (
 from django_async_backend.db.models.convert import to_async_queryset
 
 # --------------------------------------------------------------- fields ----
+
+
+def _forward_relation_names(model):
+    """Names of the model's forward FK / one-to-one fields (select_related-able)."""
+    return [
+        f.name
+        for f in model._meta.concrete_fields
+        if f.is_relation and (f.many_to_one or f.one_to_one)
+    ]
 
 
 class AsyncModelChoiceIterator(ModelChoiceIterator):
@@ -70,8 +80,17 @@ class AsyncModelChoiceIterator(ModelChoiceIterator):
     def __iter__(self):
         if self.field.empty_label is not None:
             yield ("", self.field.empty_label)
-        for obj in self._rows():
-            yield self.choice(obj)
+        rows = self._rows()
+        labels = getattr(self.field, "_async_labels", None)
+        if labels is None or len(labels) != len(rows):
+            for obj in rows:
+                yield self.choice(obj)
+            return
+        for obj, label in zip(rows, labels):
+            yield (
+                ModelChoiceIteratorValue(self.field.prepare_value(obj), obj),
+                label,
+            )
 
     def __len__(self):
         return len(self._rows()) + (
@@ -106,10 +125,38 @@ class AsyncModelChoiceField(ModelChoiceField):
 
     async def aload_choices(self):
         if self.queryset is None:
-            self._async_choices = []
+            rows = []
         else:
-            self._async_choices = [obj async for obj in self.queryset]
+            rows = [obj async for obj in self.queryset]
+        self._async_choices, self._async_labels = await self._alabel_rows(rows)
         return self._async_choices
+
+    async def _alabel_rows(self, rows, queryset=None):
+        """Label ``rows`` ahead of rendering.
+
+        ``label_from_instance()`` is ``str(obj)`` by default, and a ``__str__``
+        that reads an unfetched relation (``Permission`` reads
+        ``content_type``) would otherwise run a lazy query from inside the
+        widget while the request's event loop renders the form. When labelling
+        trips ``SynchronousOnlyOperation`` the rows are reloaded once with
+        every forward relation joined and labelled again; returns
+        ``(rows, labels)`` with the rows to keep.
+        """
+        if queryset is None:
+            queryset = self.queryset
+        try:
+            return rows, [self.label_from_instance(obj) for obj in rows]
+        except SynchronousOnlyOperation:
+            names = _forward_relation_names(queryset.model)
+            if not names:
+                raise
+        key = self.to_field_name or "pk"
+        by_key = {
+            getattr(obj, key): obj
+            async for obj in queryset.select_related(*names)
+        }
+        rows = [by_key.get(getattr(obj, key), obj) for obj in rows]
+        return rows, [self.label_from_instance(obj) for obj in rows]
 
     async def ato_python(self, value):
         if value in self.empty_values:
@@ -270,12 +317,14 @@ class AsyncModelForm(ModelForm):
                 rows = []
                 if values and field.queryset is not None:
                     try:
-                        rows = [
-                            o
-                            async for o in field.queryset.filter(
-                                **{"%s__in" % key: values}
-                            )
-                        ]
+                        selected = field.queryset.filter(
+                            **{"%s__in" % key: values}
+                        )
+                        rows = [o async for o in selected]
+                        rows, labels = await field._alabel_rows(
+                            rows, queryset=selected
+                        )
+                        field._async_labels = labels
                     except (ValueError, TypeError, ValidationError):
                         rows = []
                 field._async_choices = rows
