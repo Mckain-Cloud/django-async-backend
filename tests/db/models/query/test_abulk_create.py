@@ -17,6 +17,7 @@ from test_app.models import (
 )
 
 from django_async_backend.db import async_connections
+from django_async_backend.db.transaction import async_atomic
 from django_async_backend.test import (
     AsyncioTestCase,
     AsyncioTransactionTestCase,
@@ -153,10 +154,14 @@ class TestABulkCreate(AsyncioTestCase):
         await TestModel.async_objects.abulk_create(
             [TestModel(name="Item1", value=1)]
         )
+        # Like Django's TestCase: an expected database error must be
+        # contained in its own atomic block, or it poisons the test
+        # transaction.
         with self.assertRaises(IntegrityError):
-            await TestModel.async_objects.abulk_create(
-                [TestModel(name="Item1", value=99)]
-            )
+            async with async_atomic():
+                await TestModel.async_objects.abulk_create(
+                    [TestModel(name="Item1", value=99)]
+                )
 
     async def test_ignore_conflicts(self):
         await TestModel.async_objects.abulk_create(

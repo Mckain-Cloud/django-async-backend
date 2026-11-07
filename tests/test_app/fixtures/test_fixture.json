@@ -1,0 +1,7 @@
+[
+  {"model": "test_app.testmodel", "pk": 1, "fields": {"name": "fixture parent", "value": 10, "relative": null}},
+  {"model": "test_app.testmodel", "pk": 2, "fields": {"name": "fixture child", "value": 20, "relative": 1}},
+  {"model": "test_app.m2mtagmodel", "pk": 1, "fields": {"name": "fixture tag a"}},
+  {"model": "test_app.m2mtagmodel", "pk": 2, "fields": {"name": "fixture tag b"}},
+  {"model": "test_app.m2mownermodel", "pk": 1, "fields": {"name": "fixture owner", "tags": [1, 2]}}
+]

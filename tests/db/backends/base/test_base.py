@@ -37,8 +37,6 @@ async def drop_table():
     async with await async_connections[DEFAULT_DB_ALIAS].cursor() as cursor:
         await cursor.execute("DROP TABLE reporter_table_tmp;")
 
-    await async_connections[DEFAULT_DB_ALIAS].close()
-
 
 async def create_instance(id):
     async with await async_connections[DEFAULT_DB_ALIAS].cursor() as cursor:

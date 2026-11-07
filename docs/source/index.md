@@ -44,6 +44,8 @@ reliably across them. Connection pooling in particular is not supported there.
 - Testing
   - [`AsyncioTestCase`](testing.md#asynciotestcase)
   - [`AsyncioTransactionTestCase`](testing.md#asynciotransactiontestcase)
+  - [pytest plugin](testing.md#pytest)
+  - [factory_boy](testing.md#factory_boy) and [model_bakery](testing.md#model_bakery)
 - Implementation details
   - [Concurrency and parallelism](concurrency.md)
   - [Running queries in parallel](concurrency.md#running-queries-in-parallel)

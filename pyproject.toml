@@ -47,9 +47,17 @@ psycopg-pool = {version = "^3", optional = true}
 binary = ["psycopg-binary"]
 pool = ["psycopg-pool"]
 
+[tool.poetry.plugins."pytest11"]
+django_async_backend = "django_async_backend.pytest_plugin"
+
 
 [tool.poetry.group.dev.dependencies]
 coverage = "^7.13.4"
+factory-boy = "^3.3"
+model-bakery = "^1.24"
+pytest = "^9"
+pytest-asyncio = "^1.4"
+pytest-django = "^4.14"
 libcst = "^1.8.6"
 psycopg = {extras = ["binary", "pool"], version = "^3"}
 pydantic = "^2.12.5"

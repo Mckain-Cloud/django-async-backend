@@ -519,6 +519,62 @@ and `AsyncDjangoFilterBackend` (`filterset_class` or `filterset_fields` as
 usual; the related-field validation and the filtering run asynchronously).
 `django_async_backend.forms.AsyncForm` gives a plain form `ais_valid()`.
 
+### Testing
+
+`django_async_backend.test` mirrors Django's test cases on the async
+connection:
+
+- `AsyncioTestCase` works like Django's `TestCase`: one event loop and one
+  database transaction per class, `fixtures = [...]` and
+  `async def asetUpTestData(cls)` loaded once inside it, and a savepoint per
+  test that is rolled back afterwards. Class data is deep-copied per test
+  (Django's `TestData` descriptor), and deferrable constraints are checked
+  before the rollback.
+- `AsyncioTransactionTestCase` works like Django's `TransactionTestCase`:
+  autocommit connections, `fixtures` loaded before every test, tables flushed
+  after it.
+- `async with self.assertNumQueries(n)` (or
+  `await self.assertNumQueries(n, coroutine_function)`),
+  `await self.assertQuerySetEqual(qs, values, ...)`,
+  `async with self.captureOnCommitCallbacks(execute=True) as callbacks`, and
+  `AsyncCaptureQueriesContext`.
+- `aload_fixtures(labels, using=...)` loads Django fixtures on the async
+  connection (deserialization is Django's; the rows are saved with
+  `async_save_base()`, so they land in the caller's transaction). Natural keys
+  are not supported.
+
+Fixtures and the test body of any async harness run as different asyncio
+tasks, and a connection belongs to the task that first used it. The test
+cases re-own the connections at every phase; other harnesses call
+`release_task_ownership()` when a phase ends. The request-closing middleware
+leaves a connection alone while it is inside a test-case transaction, so
+`AsyncClient` requests see the test's data.
+
+**pytest.** Installing the package registers a pytest plugin (needs
+pytest-django and pytest-asyncio). `adb` opens a transaction per test and
+rolls it back; `atransactional_db` flushes instead; `@pytest.mark.async_db`
+(`transaction=True`, `databases=[...]`) requests either; `aclient`,
+`aadmin_user`, `aadmin_client`, `adjango_assert_num_queries`,
+`adjango_assert_max_num_queries` and `adjango_capture_on_commit_callbacks`
+mirror pytest-django's fixtures; `async_db_blocker` is the blocker that makes
+an unmarked test's async query fail loudly. Keep fixture and test loop scopes
+equal. On Windows the plugin switches to the selector event loop policy.
+
+**factory_boy.** `django_async_backend.contrib.factory_boy.AsyncDjangoModelFactory`
+adds `acreate()`, `acreate_batch()`, `abuild()`: the ordinary `build()`
+produces the object graph and `async_save()` saves it dependencies first.
+`SubFactory`, `RelatedFactory`, `django_get_or_create` (looked up with the
+async manager, on sub-factories too), sync `post_generation` hooks that stay
+off the database, `@async_post_generation` hooks that use it, and
+`AsyncIterator(queryset)` for `Iterator`-style choices all work.
+
+**model_bakery.** `django_async_backend.contrib.model_bakery` provides
+`amake()`, `amake_recipe()` (plus `aprepare`/`aprepare_recipe` aliases):
+`baker.prepare()` builds the graph, including generated foreign keys, m2m
+values (`make_m2m=True`), reverse relations, generic foreign keys to saved
+instances and auto_now overrides, and recipes with `foreign_key()`,
+`related()` and `seq()`; everything is then saved with `async_save()`.
+
 ### Free-threaded Python
 
 The library and its test suite run on CPython 3.15t with the GIL disabled
