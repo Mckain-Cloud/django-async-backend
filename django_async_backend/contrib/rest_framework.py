@@ -57,7 +57,7 @@ from rest_framework.serializers import (
 )
 from rest_framework.settings import api_settings
 from rest_framework.utils import model_meta
-from rest_framework.utils.serializer_helpers import ReturnDict
+from rest_framework.utils.serializer_helpers import ReturnDict, ReturnList
 from rest_framework.validators import UniqueTogetherValidator, UniqueValidator
 from rest_framework.validators import _check_single_instance, qs_filter
 
@@ -398,7 +398,46 @@ class AsyncSlugRelatedField(_AsyncRelatedMixin, relations.SlugRelatedField):
 # ------------------------------------------------------------ serializers ----
 
 
-class _AsyncSerializerMixin:
+class _AsyncDataMixin:
+    """``adata`` as a plain property returning a coroutine.
+
+    adrf declares ``adata`` with ``async_property``, whose descriptor runs
+    ``functools.wraps()`` on the shared ``adata`` function for every access.
+    On the free-threaded build, ``update_wrapper`` on an object shared
+    between threads serialises them (observed: a thousandfold slowdown with
+    two threads), so the property is replaced here; ``await serializer.adata``
+    keeps working.
+    """
+
+    @property
+    def adata(self):
+        return self._aget_data()
+
+    async def _aget_data(self):
+        if hasattr(self, "initial_data") and not hasattr(self, "_validated_data"):
+            raise AssertionError(
+                "When a serializer is passed a `data` keyword argument you "
+                "must call `.is_valid()` before attempting to access the "
+                "serialized `.data` representation.\n"
+                "You should either call `.is_valid()` first, "
+                "or access `.initial_data` instead."
+            )
+        if not hasattr(self, "_data"):
+            if self.instance is not None and not getattr(self, "_errors", None):
+                self._data = await self.ato_representation(self.instance)
+            elif hasattr(self, "_validated_data") and not getattr(
+                self, "_errors", None
+            ):
+                self._data = await self.ato_representation(self.validated_data)
+            else:
+                self._data = self.get_initial()
+        return self._wrap_data(self._data)
+
+    def _wrap_data(self, data):
+        return ReturnDict(data, serializer=self)
+
+
+class _AsyncSerializerMixin(_AsyncDataMixin):
     """Async representation and validation for ``Serializer`` subclasses."""
 
     async def _aget_attribute(self, field, instance):
@@ -521,7 +560,10 @@ class _AsyncSerializerMixin:
         return ret
 
 
-class AsyncListSerializer(adrf_serializers.ListSerializer):
+class AsyncListSerializer(_AsyncDataMixin, adrf_serializers.ListSerializer):
+    def _wrap_data(self, data):
+        return ReturnList(data, serializer=self)
+
     async def ato_representation(self, data):
         return [
             await self.child.ato_representation(item) for item in await aiterate(data)
