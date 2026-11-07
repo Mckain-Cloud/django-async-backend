@@ -382,5 +382,9 @@ support). Two things are specific to that build:
   thread. With several busy worker threads a collection takes hundreds of
   milliseconds and runs often, which shows up as p99 latency; raising
   `gc.set_threshold()` trades fewer, longer pauses, and `gc.freeze()` does
-  not shorten them. Per-process workers (the GIL build) do not have this
-  problem. Watch `gc.callbacks` timings before choosing thread workers.
+  not shorten them. Per-process workers do not have this problem: granian
+  rebuilt with its process model on the free-threaded interpreter (its
+  worker model is a compile-time choice keyed on `Py_GIL_DISABLED`) matched
+  or beat the GIL build on every endpoint, at the price of one full
+  interpreter per worker. Watch `gc.callbacks` timings before choosing
+  thread workers.
