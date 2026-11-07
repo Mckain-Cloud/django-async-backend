@@ -137,7 +137,62 @@ def pytest_addoption(parser):
     )
 
 
+def _uses_async_db(item):
+    """Does this item get the database through this plugin?"""
+    if _marker_options(item) is not None:
+        return True
+    fixturenames = getattr(item, "fixturenames", ())
+    if "adb" in fixturenames or "atransactional_db" in fixturenames:
+        return True
+    cls = getattr(item, "cls", None)
+    if cls is not None:
+        from django_async_backend.test import AsyncioTransactionTestCase
+
+        return issubclass(cls, AsyncioTransactionTestCase)
+    return False
+
+
+def _teach_pytest_django_our_fixtures():
+    """pytest-django creates test databases only for the aliases its own
+    ``db``/``transactional_db`` fixtures and ``django_db`` mark request. Make
+    it count tests that use ``adb``, ``atransactional_db``, the ``async_db``
+    mark or an ``AsyncioTestCase`` class as well; otherwise the async
+    connections would hit the real database.
+    """
+    try:
+        from pytest_django import fixtures as pd_fixtures
+    except ImportError:  # pragma: no cover
+        return
+    original = getattr(pd_fixtures, "_get_databases_for_test", None)
+    if original is None or getattr(original, "_django_async_backend", False):
+        return
+
+    def _get_databases_for_test(test):
+        databases, serialized = original(test)
+        if databases or not _uses_async_db(test):
+            return databases, serialized
+        from django_async_backend.test import AsyncioTransactionTestCase
+
+        options = _marker_options(test) or {}
+        wanted = options.get("databases")
+        cls = getattr(test, "cls", None)
+        if (
+            wanted is None
+            and cls is not None
+            and issubclass(cls, AsyncioTransactionTestCase)
+        ):
+            return cls._database_aliases(), False
+        aliases = AsyncioTransactionTestCase._database_aliases()
+        if wanted is not None:
+            aliases = [alias for alias in aliases if alias in wanted]
+        return aliases, False
+
+    _get_databases_for_test._django_async_backend = True
+    pd_fixtures._get_databases_for_test = _get_databases_for_test
+
+
 def pytest_configure(config):
+    _teach_pytest_django_our_fixtures()
     config.addinivalue_line(
         "markers",
         "async_db(transaction=False, databases=None): give the test async "

@@ -11,7 +11,7 @@ from pathlib import Path
 
 TESTS_DIR = Path(__file__).resolve().parent
 SAMPLE_DIR = TESTS_DIR / "pytest_sample"
-EXPECTED_PASSED = 12
+EXPECTED_PASSED = 13
 
 
 def _installed(name):

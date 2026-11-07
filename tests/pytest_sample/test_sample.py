@@ -14,6 +14,13 @@ async def test_blocked_without_fixture():
         await TestModel.async_objects.acount()
 
 
+async def test_adb_uses_the_test_database(adb):
+    async with await async_connections["default"].cursor() as cursor:
+        await cursor.execute("select current_database()")
+        (name,) = await cursor.fetchone()
+    assert name.startswith("test_"), name
+
+
 async def test_adb_isolation_one(adb):
     assert await TestModel.async_objects.acount() == 0
     await TestModel.async_objects.acreate(name="one", value=1)
