@@ -11,6 +11,7 @@ from test_app.models import (
 from django_async_backend.db.models.base import AsyncModelMixin
 from django_async_backend.test import AsyncioTestCase
 from django_async_backend.utils.contenttypes import aget_for_model
+from tests.contrib.test_admin import no_sync_queries
 
 
 class InstanceHintRouter:
@@ -48,27 +49,96 @@ class TestAsyncRefreshFromDb(AsyncioTestCase):
     async def test_returns_none(self):
         self.assertIsNone(await self.obj.async_refresh_from_db())
 
-    async def test_fields_is_not_supported(self):
-        with self.assertRaises(NotImplementedError) as cm:
+    async def test_fields_reloads_only_those(self):
+        await TestModel.async_objects.filter(pk=self.obj.pk).aupdate(
+            name="Renamed", value=99
+        )
+
+        with no_sync_queries():
             await self.obj.async_refresh_from_db(fields=["value"])
 
-        self.assertEqual(
-            str(cm.exception),
-            "async_refresh_from_db() always reloads every concrete field; "
-            "'fields' is not supported.",
+        self.assertEqual(self.obj.value, 99)
+        self.assertEqual(self.obj.name, "Item1", "not in fields: untouched")
+
+    async def test_fields_accepts_attnames(self):
+        parent = await TestModel.async_objects.acreate(name="Parent", value=0)
+        await TestModel.async_objects.filter(pk=self.obj.pk).aupdate(
+            relative=parent
         )
 
-    async def test_from_queryset_is_not_supported(self):
-        with self.assertRaises(NotImplementedError) as cm:
+        with no_sync_queries():
+            await self.obj.async_refresh_from_db(fields=["relative_id"])
+
+        self.assertEqual(self.obj.relative_id, parent.pk)
+
+    async def test_fields_keeps_other_deferred_fields_deferred(self):
+        deferred = [
+            o
+            async for o in TestModel.async_objects.only("id", "name").filter(
+                pk=self.obj.pk
+            )
+        ][0]
+        await TestModel.async_objects.filter(pk=self.obj.pk).aupdate(
+            name="Renamed", value=99
+        )
+
+        await deferred.async_refresh_from_db(fields=["name"])
+
+        self.assertEqual(deferred.name, "Renamed")
+        self.assertEqual(
+            deferred.get_deferred_fields(), {"value", "relative_id"}
+        )
+
+    async def test_fields_naming_a_prefetched_relation_drops_its_cache(self):
+        self.obj._prefetched_objects_cache = {"relatives": []}
+
+        async with self.assertNumQueries(0):
+            await self.obj.async_refresh_from_db(fields=["relatives"])
+
+        self.assertEqual(self.obj._prefetched_objects_cache, {})
+
+    async def test_fields_rejects_lookups(self):
+        with self.assertRaises(ValueError) as cm:
+            await self.obj.async_refresh_from_db(fields=["relative__name"])
+        self.assertIn('Found "__" in fields argument.', str(cm.exception))
+
+    async def test_from_queryset(self):
+        await TestModel.async_objects.filter(pk=self.obj.pk).aupdate(value=5)
+
+        with no_sync_queries():
             await self.obj.async_refresh_from_db(
-                from_queryset=TestModel.async_objects.all()
+                from_queryset=TestModel.async_objects.filter(value__gt=0)
+            )
+            self.assertEqual(self.obj.value, 5)
+            with self.assertRaises(TestModel.DoesNotExist):
+                await self.obj.async_refresh_from_db(
+                    from_queryset=TestModel.async_objects.filter(value__lt=0)
+                )
+
+    async def test_from_queryset_sync_queryset_is_converted(self):
+        await TestModel.async_objects.filter(pk=self.obj.pk).aupdate(value=7)
+
+        with no_sync_queries():
+            await self.obj.async_refresh_from_db(
+                from_queryset=TestModel.objects.all()
             )
 
-        self.assertEqual(
-            str(cm.exception),
-            "async_refresh_from_db() always reloads every concrete field; "
-            "'from_queryset' is not supported.",
+        self.assertEqual(self.obj.value, 7)
+
+    async def test_from_queryset_select_related_fills_the_cache(self):
+        parent = await TestModel.async_objects.acreate(name="Parent", value=0)
+        await TestModel.async_objects.filter(pk=self.obj.pk).aupdate(
+            relative=parent
         )
+
+        with no_sync_queries():
+            await self.obj.async_refresh_from_db(
+                from_queryset=TestModel.async_objects.select_related(
+                    "relative"
+                )
+            )
+            # The cached relation came with the row: no lazy load needed.
+            self.assertEqual(self.obj.relative, parent)
 
     async def test_using_selects_the_connection(self):
         """Each alias runs in its own uncommitted transaction, so this row is

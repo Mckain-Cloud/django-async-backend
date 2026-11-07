@@ -102,29 +102,143 @@ module:
           async def async_refresh_from_db(
               self, using=None, fields=None, from_queryset=None
           ):
-              for name, value in (
-                  ("fields", fields),
-                  ("from_queryset", from_queryset),
-              ):
-                  if value is not None:
-                      raise NotImplementedError(
-                          "async_refresh_from_db() always reloads every "
-                          f"concrete field; '{name}' is not supported."
+              """Django's ``refresh_from_db()`` on the async connection.
+
+              ``fields`` and ``from_queryset`` work as in Django (a sync
+              ``from_queryset`` is converted). One difference: with
+              ``fields=None`` every concrete field is reloaded, deferred ones
+              included, because reading a deferred field afterwards would go
+              through the sync ORM and raise ``SynchronousOnlyOperation``.
+              """
+              from django_async_backend.db.models.convert import (
+                  to_async_queryset,
+              )
+
+              if fields is None:
+                  self._prefetched_objects_cache = {}
+              else:
+                  prefetched_objects_cache = getattr(
+                      self, "_prefetched_objects_cache", ()
+                  )
+                  fields = set(fields)
+                  for field in fields.copy():
+                      if field in prefetched_objects_cache:
+                          del prefetched_objects_cache[field]
+                          fields.remove(field)
+                  if not fields:
+                      return
+                  if any(LOOKUP_SEP in f for f in fields):
+                      raise ValueError(
+                          'Found "%s" in fields argument. Relations and '
+                          "transforms are not allowed in fields." % LOOKUP_SEP
                       )
 
-              manager = self.__class__._async_base_manager.db_manager(
-                  using, hints={"instance": self}
-              )
-              db_instance = await manager.filter(
-                  pk=self._async_get_pk_val()
-              ).aget()
-              for field in self._meta.concrete_fields:
-                  setattr(
-                      self, field.attname, getattr(db_instance, field.attname)
+              if from_queryset is None:
+                  hints = {"instance": self}
+                  from_queryset = self.__class__._async_base_manager.db_manager(
+                      using, hints=hints
                   )
-              self._state.fields_cache = {}
-              self._prefetched_objects_cache = {}
+              else:
+                  from_queryset = to_async_queryset(from_queryset)
+                  if using is not None:
+                      from_queryset = from_queryset.using(using)
+
+              db_instance_qs = from_queryset.filter(pk=self.pk)
+              if fields is not None:
+                  db_instance_qs = db_instance_qs.only(*fields)
+
+              db_instance = await db_instance_qs.aget()
+              non_loaded_fields = db_instance.get_deferred_fields()
+              for field in self._meta.fields:
+                  if field.attname in non_loaded_fields:
+                      # This field wasn't refreshed - skip ahead.
+                      continue
+                  if field.concrete:
+                      setattr(
+                          self, field.attname, getattr(db_instance, field.attname)
+                      )
+                  # Clear or copy cached foreign keys.
+                  if field.is_relation:
+                      if field.is_cached(db_instance):
+                          field.set_cached_value(
+                              self, field.get_cached_value(db_instance)
+                          )
+                      elif field.is_cached(self):
+                          field.delete_cached_value(self)
+
+              # Clear cached relations.
+              for rel in self._meta.related_objects:
+                  if (fields is None or rel.name in fields) and rel.is_cached(
+                      self
+                  ):
+                      rel.delete_cached_value(self)
+
+              # Clear cached private relations.
+              for field in self._meta.private_fields:
+                  if (
+                      (fields is None or field.name in fields)
+                      and field.is_relation
+                      and field.is_cached(self)
+                  ):
+                      field.delete_cached_value(self)
+
               self._state.db = db_instance._state.db
+        - |
+          async def _async_get_next_or_previous_by_FIELD(
+              self, field, is_next, **kwargs
+          ):
+              # Behind aget_next_by_<field>() / aget_previous_by_<field>(),
+              # attached per model by db/models/ordering.py.
+              if not self._async_is_pk_set():
+                  raise ValueError(
+                      "get_next/get_previous cannot be used on unsaved objects."
+                  )
+              op = "gt" if is_next else "lt"
+              order = "" if is_next else "-"
+              param = getattr(self, field.attname)
+              q = Q.create(
+                  [(field.name, param), (f"pk__{op}", self.pk)], connector=Q.AND
+              )
+              q = Q.create([q, (f"{field.name}__{op}", param)], connector=Q.OR)
+              qs = (
+                  self.__class__.async_objects.using(self._state.db)
+                  .filter(**kwargs)
+                  .filter(q)
+                  .order_by("%s%s" % (order, field.name), "%spk" % order)
+              )
+              obj = await qs.afirst()
+              if obj is None:
+                  raise self.DoesNotExist(
+                      "%s matching query does not exist."
+                      % self.__class__._meta.object_name
+                  )
+              return obj
+        - |
+          async def _async_get_next_or_previous_in_order(self, is_next):
+              # Behind aget_next_in_order() / aget_previous_in_order() of a
+              # model with order_with_respect_to (db/models/ordering.py).
+              cachename = "__%s_order_cache" % is_next
+              if not hasattr(self, cachename):
+                  op = "gt" if is_next else "lt"
+                  order = "_order" if is_next else "-_order"
+                  order_field = self._meta.order_with_respect_to
+                  filter_args = order_field.get_filter_kwargs_for_object(self)
+                  manager = self.__class__.async_objects
+                  obj = await (
+                      manager.filter(**filter_args)
+                      .filter(
+                          **{
+                              "_order__%s"
+                              % op: manager.values("_order").filter(
+                                  **{self._meta.pk.name: self.pk}
+                              )
+                          }
+                      )
+                      .order_by(order)[:1]
+                      .aget()
+                  )
+                  setattr(self, cachename, obj)
+              return getattr(self, cachename)
 
       assigns:
         - target:

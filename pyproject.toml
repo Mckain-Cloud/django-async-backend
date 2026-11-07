@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "django-async-backend"
-version = "6.1.5+lab1"
+version = "6.1.5+lab2"
 description = "True async Django ORM and PostgreSQL backend with connection pooling and async transactions"
 readme = "README.md"
 authors = ["Arfey <arfey@gmail.com>"]
@@ -42,10 +42,12 @@ django = ">=6.1"
 psycopg = "^3"
 psycopg-binary = {version = "^3", optional = true}
 psycopg-pool = {version = "^3", optional = true}
+redis = {version = ">=5", optional = true}
 
 [tool.poetry.extras]
 binary = ["psycopg-binary"]
 pool = ["psycopg-pool"]
+redis = ["redis"]
 
 [tool.poetry.plugins."pytest11"]
 django_async_backend = "django_async_backend.pytest_plugin"
@@ -62,6 +64,7 @@ libcst = "^1.8.6"
 psycopg = {extras = ["binary", "pool"], version = "^3"}
 pydantic = "^2.12.5"
 pyyaml = "^6.0.3"
+redis = ">=5"
 requests = "^2.32.5"
 uvicorn = "^0.38.0"
 

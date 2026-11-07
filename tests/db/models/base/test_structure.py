@@ -23,6 +23,7 @@ PUBLIC_API = {
 EXEMPT = {
     "_meta",
     "_state",
+    "DoesNotExist",
     "NotUpdated",
     "aclean",
     "aclean_fields",  # hand-written: db/models/validation.py

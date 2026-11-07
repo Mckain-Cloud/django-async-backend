@@ -38,4 +38,9 @@ def _patch_model():
             setattr(AsyncModelMixin, name, value)
     patch_related_managers()
     patch_araw()
+    # Per-model accessors (aget_next_by_<field>, aget_next_in_order,
+    # aget_<model>_order) need the mixin members above on every model.
+    from django_async_backend.db.models.ordering import install
+
+    install()
     _patched = True

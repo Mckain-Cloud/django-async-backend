@@ -232,9 +232,16 @@ equivalents are the names in the comments column.
 | ------------------------ | --------- | ------------------------ |
 | `Model.asave`            | ✅        | `async_save`             |
 | `Model.adelete`          | ✅        | `async_delete`           |
-| `Model.arefresh_from_db` | ✅        | `async_refresh_from_db`  |
-| `Model.full_clean`       | ✅        | `async_full_clean` (also `async_validate_unique`, `async_validate_constraints`); unique and check constraints are validated on the async connection |
+| `Model.arefresh_from_db` | ✅        | `async_refresh_from_db`; `fields=` and `from_queryset=` work as in Django (a sync `from_queryset` is converted). With `fields=None` every concrete field is reloaded, deferred ones included |
+| `Model.full_clean`       | ✅        | `async_full_clean` (also `aclean_fields`, `async_validate_unique`, `async_validate_constraints`); unique and check constraints are validated on the async connection |
+| `Model.get_next_by_FOO` / `get_previous_by_FOO` | ✅ | `aget_next_by_FOO` / `aget_previous_by_FOO`, attached to every model with a non-null `DateField` / `DateTimeField` (extra filters as keyword arguments, as in Django) |
+| `Model.get_next_in_order` / `get_previous_in_order` | ✅ | `aget_next_in_order` / `aget_previous_in_order` on a model with `Meta.order_with_respect_to` |
+| `get_FOO_order` / `set_FOO_order` | ✅ | `aget_FOO_order` (returns the list of primary keys) / `aset_FOO_order` on the model the ordering is relative to |
 | `Model.afetch`           | ✅        | new: `await obj.afetch("author", "body", "tags")` loads forward FKs, reverse one-to-ones, deferred fields and multi-valued relations, filling Django's caches so the plain attribute works afterwards |
+
+Every other `Model` method is pure (no query) and shared. Overriding one of
+the sync methods above without its twin is reported by `async_backend.W001`
+(see *Finding what still runs synchronously*).
 
 ### RawQuerySet
 
@@ -291,7 +298,7 @@ relations joined instead of lazy-loading inside the widget.
 | piece | setting |
 | --- | --- |
 | `contrib.auth.AsyncModelBackend` | `AUTHENTICATION_BACKENDS` |
-| `contrib.sessions` (`SessionStore`) | `SESSION_ENGINE` |
+| `contrib.sessions` (`SessionStore`), `contrib.sessions.cached_db` | `SESSION_ENGINE` |
 | `contrib.sessions.AsyncSessionMiddleware` | replaces `SessionMiddleware` |
 | `contrib.messages.AsyncMessageMiddleware` | replaces `MessageMiddleware` |
 | `contrib.admin.AsyncAdminSite` / `AsyncModelAdmin` / inlines | your admin site |
@@ -454,22 +461,34 @@ the async twin instead of quietly running the query on the sync connection.
 
 ### Caches
 
-`django_async_backend.core.cache.AsyncDatabaseCache` is Django's database
-cache backend with the `a*` methods implemented on the async connection
-(`INSERT ... ON CONFLICT` upserts, async culling); the sync methods and
-`createcachetable` are unchanged. Django's `BaseCache` implements every
-async method as a thread hop, so one native backend lifts everything built
-on the cache API:
+Django's `BaseCache` implements every async method as a thread hop, so one
+native backend lifts everything built on the cache API. Two are provided:
+
+- `django_async_backend.core.cache.redis.AsyncRedisCache` is Django's Redis
+  backend with the `a*` methods on `redis.asyncio` (install the `redis`
+  extra). `OPTIONS` go to both clients' pools; `async_pool_class` /
+  `async_parser_class` select the async pool and parser. Pools are kept per
+  event loop (one per worker process) and released by
+  `await cache.adisconnect()`.
+- `django_async_backend.core.cache.AsyncDatabaseCache` is Django's database
+  cache backend with the `a*` methods implemented on the async connection
+  (`INSERT ... ON CONFLICT` upserts, async culling); the sync methods and
+  `createcachetable` are unchanged.
 
 ```python
 CACHES = {"default": {
-    "BACKEND": "django_async_backend.core.cache.AsyncDatabaseCache",
-    "LOCATION": "cache_table",
+    "BACKEND": "django_async_backend.core.cache.redis.AsyncRedisCache",
+    "LOCATION": "redis://redis:6379/0",
+    "OPTIONS": {"socket_connect_timeout": 5, "socket_timeout": 5},
 }}
-SESSION_ENGINE = "django.contrib.sessions.backends.cache"   # or cached_db
+SESSION_ENGINE = "django_async_backend.contrib.sessions.cached_db"
+# or "django.contrib.sessions.backends.cache" for cache-only sessions
 ```
 
-- Django's cache and `cached_db` session stores are async by composition.
+- Django's cache session store is async by composition.
+  `django_async_backend.contrib.sessions.cached_db` is Django's `cached_db`
+  store over the async cache and this package's database store (Django's
+  own `cached_db` would read the database half through a thread).
 - `{% cache %}` is rendered by the async template engine with `aget`/`aset`.
 - `django_async_backend.core.cache.acache_page(timeout)` and
   `AsyncCacheMiddleware` are the async `cache_page()` / `CacheMiddleware`
@@ -486,9 +505,11 @@ transaction, as Django's own `DatabaseCache` does under `ATOMIC_REQUESTS`.
 Three settings make the remaining sync paths visible or forbidden:
 
 - **System checks.** `async_backend.W001`: a model overrides `save()`,
-  `delete()` or `clean()` without `async_save()`, `async_delete()` or
-  `aclean()`; the async methods are generated from Django's bodies and skip
-  the sync override. `async_backend.W002`: a sync receiver is connected to a
+  `delete()`, `clean()`, `clean_fields()`, `full_clean()`,
+  `validate_unique()`, `validate_constraints()` or `refresh_from_db()`
+  without the async twin (`async_save()`, `async_delete()`, `aclean()`,
+  `aclean_fields()`, `async_full_clean()`, ...); the async methods are
+  generated from Django's bodies and skip the sync override. `async_backend.W002`: a sync receiver is connected to a
   request-time signal (`pre_save`, `post_save`, `pre_delete`, `post_delete`,
   `m2m_changed`, the auth login signals). `ASYNC_BACKEND_OVERRIDE_CHECK` and
   `ASYNC_BACKEND_SYNC_RECEIVER_CHECK` take `"warn"` (default), `"error"` or

@@ -1,3 +1,5 @@
+import os
+
 DATABASES = {
     "default": {
         "ENGINE": "django_async_backend.db.backends.postgresql",
@@ -74,6 +76,14 @@ CACHES = {
         "BACKEND": "django_async_backend.core.cache.AsyncDatabaseCache",
         "LOCATION": "test_cache_table",
         "OPTIONS": {"MAX_ENTRIES": 50, "CULL_FREQUENCY": 2},
+    },
+    # tests/core/test_redis_cache.py skips itself when nothing listens here.
+    "redis": {
+        "BACKEND": "django_async_backend.core.cache.redis.AsyncRedisCache",
+        "LOCATION": os.environ.get(
+            "DAB_TEST_REDIS_URL", "redis://localhost:6379/9"
+        ),
+        "KEY_PREFIX": "dab-tests",
     },
 }
 # Fast hasher: these tests log in a lot.

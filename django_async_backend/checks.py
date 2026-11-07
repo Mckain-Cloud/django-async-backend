@@ -1,11 +1,14 @@
 """System checks for code the async paths cannot reach.
 
-``async_backend.W001`` – a model overrides ``save()``, ``delete()`` or
-``clean()`` without the async twin (``async_save()``, ``async_delete()``,
-``aclean()``). The async methods are generated from Django's bodies and do
-not call a sync override, so the override is silently skipped on the async
-path. Port the logic to the async method (and have the sync one delegate,
-or keep both in step).
+``async_backend.W001`` – a model overrides ``save()``, ``delete()``,
+``clean()``, ``clean_fields()``, ``full_clean()``, ``validate_unique()``,
+``validate_constraints()`` or ``refresh_from_db()`` without the async twin
+(``async_save()``, ``async_delete()``, ``aclean()``, ``aclean_fields()``,
+``async_full_clean()``, ``async_validate_unique()``,
+``async_validate_constraints()``, ``async_refresh_from_db()``). The async
+methods are generated from Django's bodies and do not call a sync override,
+so the override is silently skipped on the async path. Port the logic to the
+async method (and have the sync one delegate, or keep both in step).
 
 ``async_backend.W002`` – a sync receiver is connected to a request-time
 signal. ``Signal.asend()`` runs it through ``sync_to_async()`` on the sync
@@ -29,6 +32,11 @@ OVERRIDE_PAIRS = (
     ("save", "async_save"),
     ("delete", "async_delete"),
     ("clean", "aclean"),
+    ("clean_fields", "aclean_fields"),
+    ("full_clean", "async_full_clean"),
+    ("validate_unique", "async_validate_unique"),
+    ("validate_constraints", "async_validate_constraints"),
+    ("refresh_from_db", "async_refresh_from_db"),
 )
 
 REQUEST_TIME_SIGNALS = [
