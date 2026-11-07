@@ -173,7 +173,7 @@ Legend: ✅ supported · ❌ not supported · ⚠️ supported with caveats
 | `Model.objects.aexists`             | ✅        |          |
 | `Model.objects.acontains`           | ✅        |          |
 | `Model.objects.aexplain`            | ✅        |          |
-| `Model.objects.araw`                | ❌        |          |
+| `Model.objects.araw`                | ✅        | on the sync manager too: returns the async `RawQuerySet` below |
 | `Model.objects.all`                 | ✅        |          |
 | `Model.objects.filter`              | ✅        |          |
 | `Model.objects.exclude`             | ✅        |          |
