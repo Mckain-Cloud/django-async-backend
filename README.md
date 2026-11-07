@@ -425,6 +425,14 @@ router.register("books", BookViewSet)
   `Field._creation_counter += 1` per field instance is a smaller version of
   the same problem.
 
+### `Model.objects.araw()`
+
+Every Django manager and queryset gets `araw(sql, params)` returning this
+package's async `RawQuerySet`, so `[row async for row in
+Model.objects.araw("SELECT ...")]` runs on the request's connection
+(Django's own `raw()` returns a sync `RawQuerySet` whose `async for` is a
+thread hop). `async_objects.raw()` and `async_objects.araw()` are the same.
+
 ### The async QuerySet is a Django QuerySet
 
 `django_async_backend.db.models.query.QuerySet` subclasses

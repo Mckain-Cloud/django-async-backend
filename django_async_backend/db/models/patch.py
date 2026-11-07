@@ -11,6 +11,7 @@ from django.db.models.base import Model
 
 from django_async_backend.db.models.base import AsyncModelMixin
 from django_async_backend.db.models.fetch import afetch
+from django_async_backend.db.models.raw import patch_araw
 from django_async_backend.db.models.related import patch_related_managers
 from django_async_backend.db.models.validation import aclean_fields
 
@@ -36,4 +37,5 @@ def _patch_model():
         if name not in vars(AsyncModelMixin):
             setattr(AsyncModelMixin, name, value)
     patch_related_managers()
+    patch_araw()
     _patched = True
