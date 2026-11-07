@@ -367,3 +367,20 @@ A custom descriptor or manager takes part in `prefetch_related()` by
 implementing `async def aget_prefetch_querysets(self, instances, querysets)`
 (same six-tuple as Django's hook, with an async queryset) and in `afetch()`
 by implementing `async def aget_object(self, instance)`.
+
+### Free-threaded Python
+
+The library and its test suite run on CPython 3.15t with the GIL disabled
+(psycopg-binary, uvloop and pydantic-core all declare free-threading
+support). Two things are specific to that build:
+
+- Granian's free-threaded build runs each worker as a *thread* with its own
+  event loop in one process. Connection pools are therefore registered per
+  event loop (an `AsyncConnectionPool` is bound to the loop that opened it);
+  the sync wrapper's pool stays process-wide as in Django.
+- The free-threaded cyclic collector is non-generational and stops every
+  thread. With several busy worker threads a collection takes hundreds of
+  milliseconds and runs often, which shows up as p99 latency; raising
+  `gc.set_threshold()` trades fewer, longer pauses, and `gc.freeze()` does
+  not shorten them. Per-process workers (the GIL build) do not have this
+  problem. Watch `gc.callbacks` timings before choosing thread workers.
