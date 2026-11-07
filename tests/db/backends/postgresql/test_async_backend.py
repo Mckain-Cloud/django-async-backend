@@ -213,6 +213,50 @@ class Tests(AsyncioTestCase):
                 await conn.close()
             await new_connection.close_pool()
 
+    async def test_connect_pool_is_per_event_loop(self):
+        """Loops running side by side in one process (granian's free-threaded
+        build runs each worker in its own thread) must not share a pool: an
+        AsyncConnectionPool's locks are bound to the loop that first used it,
+        and a second loop then fails with "bound to a different event loop"."""
+        import threading
+
+        results = {}
+        errors = {}
+
+        async def use_pool(name):
+            connection = no_pool_connection(alias="default_pool")
+            connection.settings_dict["OPTIONS"]["pool"] = {
+                "min_size": 1,
+                "max_size": 2,
+            }
+            try:
+                async with await connection.cursor() as cursor:
+                    await cursor.execute("SELECT 1")
+                    self.assertEqual((await cursor.fetchone())[0], 1)
+                results[name] = id(connection.pool)
+            finally:
+                await connection.close()
+                await connection.close_pool()
+
+        def run(name):
+            try:
+                asyncio.run(use_pool(name))
+            except Exception as e:  # pragma: no cover - reported below
+                errors[name] = repr(e)
+
+        threads = [threading.Thread(target=run, args=(n,)) for n in ("a", "b")]
+        for t in threads:
+            t.start()
+        await use_pool("main")
+        for t in threads:
+            t.join(30)
+        self.assertEqual(errors, {})
+        self.assertEqual(len(set(results.values())), 3, results)
+        self.assertNotIn(
+            "default_pool",
+            async_base.AsyncDatabaseWrapper._pools_for_current_loop(),
+        )
+
     async def test_connect_pool_set_to_true(self):
         new_connection = no_pool_connection(alias="default_pool")
         new_connection.settings_dict["OPTIONS"]["pool"] = True

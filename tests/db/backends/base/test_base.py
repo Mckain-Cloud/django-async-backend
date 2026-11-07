@@ -1,5 +1,7 @@
 import asyncio
 import gc
+import sys
+import weakref
 from unittest import skipIf
 from unittest.mock import (
     MagicMock,
@@ -178,11 +180,28 @@ class DatabaseWrapperTests(AsyncioTransactionTestCase):
         # Close the connection and remove references to it. This will mark all
         # objects related to the connection as garbage to be collected.
         await test_connection.close()
+        ref = weakref.ref(test_connection)
         test_connection = None
 
         # Enforce garbage collection to populate `gc.garbage` for inspection.
         gc.collect()
-        self.assertEqual(gc.garbage, [])
+        if getattr(sys, "_is_gil_enabled", lambda: True)():
+            # The wrapper's helpers (features, ops) break their back-references
+            # in __del__, so the default collector frees everything through
+            # refcounting while finalizing and nothing reaches gc.garbage.
+            self.assertEqual(gc.garbage, [])
+        else:
+            # The free-threaded collector does not refcount-free objects during
+            # finalization, so with DEBUG_SAVEALL the same (collectable) cycle
+            # is reported instead of freed. What matters is that it is gone
+            # once the debug flag no longer pins it.
+            self.assertTrue(
+                any(isinstance(obj, BaseAsyncDatabaseWrapper) for obj in gc.garbage)
+            )
+            gc.garbage.clear()
+            gc.set_debug(0)
+            gc.collect()
+        self.assertIsNone(ref())
 
 
 class DatabaseWrapperLoggingTests(AsyncioTransactionTestCase):

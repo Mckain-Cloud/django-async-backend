@@ -1,5 +1,6 @@
 import asyncio
 import threading
+import weakref
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
@@ -73,8 +74,26 @@ class AsyncDatabaseWrapper(BaseAsyncDatabaseWrapper):
 
     # PostgreSQL backend-specific attributes.
     _named_cursor_idx = 0
-    _connection_pools = {}
+    # An AsyncConnectionPool belongs to the event loop that opened it (its
+    # locks and worker tasks are bound to that loop), so pools are registered
+    # per loop: {loop: {alias: pool}}. One process can run several loops at
+    # once, e.g. granian's free-threaded build runs each worker in its own
+    # thread. Entries disappear with their loop.
+    _connection_pools = weakref.WeakKeyDictionary()
+    # Pools created while no loop is running (sync setup code).
+    _loopless_connection_pools = {}
     _pg_version = None
+
+    @classmethod
+    def _pools_for_current_loop(cls):
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return cls._loopless_connection_pools
+        try:
+            return cls._connection_pools[loop]
+        except KeyError:
+            return cls._connection_pools.setdefault(loop, {})
 
     @property
     def pool(self):
@@ -82,7 +101,8 @@ class AsyncDatabaseWrapper(BaseAsyncDatabaseWrapper):
         if self.alias == NO_DB_ALIAS or not pool_options:
             return None
 
-        if self.alias not in self._connection_pools:
+        pools = self._pools_for_current_loop()
+        if self.alias not in pools:
             if self.settings_dict.get("CONN_MAX_AGE", 0) != 0:
                 raise ImproperlyConfigured(
                     "Pooling doesn't support persistent connections."
@@ -114,18 +134,18 @@ class AsyncDatabaseWrapper(BaseAsyncDatabaseWrapper):
                 ),
                 **pool_options,
             )
-            # setdefault() ensures that multiple threads don't set this in
+            # setdefault() ensures that concurrent callers don't set this in
             # parallel. Since we do not open the pool during it's init above,
-            # this means that at worst during startup multiple threads generate
+            # this means that at worst during startup several callers generate
             # pool objects and the first to set it wins.
-            self._connection_pools.setdefault(self.alias, pool)
+            pools.setdefault(self.alias, pool)
 
-        return self._connection_pools[self.alias]
+        return pools[self.alias]
 
     async def close_pool(self):
         if self.pool:
             await self.pool.close()
-            del self._connection_pools[self.alias]
+            del self._pools_for_current_loop()[self.alias]
 
     async def get_database_version(self):
         """
