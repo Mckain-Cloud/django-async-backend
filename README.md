@@ -30,7 +30,11 @@ is pinned to the Django feature release it was generated against.
 
 | django-async-backend | Django  |
 | -------------------- | ------- |
+| `6.1.5`              | `6.1.3` |
 | `6.1.3`              | `6.1.0` |
+
+Builds from the Mckain-Cloud `lab` branch carry a local label (`6.1.5+lab2`)
+so pins such as `django-async-backend==6.1.5` still match them.
 
 Part of the ORM layer is generated from Django's own source, so a Django feature
 release gets a matching django-async-backend feature release rather than a
@@ -59,9 +63,12 @@ use connection pooling, add the `pool` extra as well:
 pip install django-async-backend[binary,pool]
 ```
 
-The package tracks Django's major and minor version — for example `6.0.x`
-matches Django `6.0` — because a large part of the ORM layer is generated from
-Django's own source.
+Add the `redis` extra for `AsyncRedisCache` (see *Caches*).
+
+> [!NOTE]
+> **Windows:** psycopg's async connections do not work on the default Proactor
+> event loop. Set `asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())`
+> before the loop starts (the pytest plugin does this for you).
 
 ## Quick start
 
@@ -89,11 +96,12 @@ MIDDLEWARE = [
 ```python
 from django.db import models
 from django_async_backend.db import async_acquire
-from django_async_backend.db.models.base import AsyncModelMixin
 from django_async_backend.db.transaction import async_atomic
 
 
-class Book(AsyncModelMixin, models.Model):
+# No mixin needed: on startup the app adds `async_objects`, `async_save()`,
+# `async_delete()` and the other async methods to every model.
+class Book(models.Model):
     name = models.CharField(max_length=100)
 
 
@@ -233,7 +241,7 @@ equivalents are the names in the comments column.
 | `Model.asave`            | ✅        | `async_save`             |
 | `Model.adelete`          | ✅        | `async_delete`           |
 | `Model.arefresh_from_db` | ✅        | `async_refresh_from_db`; `fields=` and `from_queryset=` work as in Django (a sync `from_queryset` is converted). With `fields=None` every concrete field is reloaded, deferred ones included |
-| `Model.full_clean`       | ✅        | `async_full_clean` (also `aclean_fields`, `async_validate_unique`, `async_validate_constraints`); unique and check constraints are validated on the async connection |
+| `Model.full_clean`       | ✅        | `async_full_clean` (also `aclean_fields`, `async_validate_unique`, `async_validate_constraints`); foreign-key existence, unique and check constraints are validated on the async connection |
 | `Model.get_next_by_FOO` / `get_previous_by_FOO` | ✅ | `aget_next_by_FOO` / `aget_previous_by_FOO`, attached to every model with a non-null `DateField` / `DateTimeField` (extra filters as keyword arguments, as in Django) |
 | `Model.get_next_in_order` / `get_previous_in_order` | ✅ | `aget_next_in_order` / `aget_previous_in_order` on a model with `Meta.order_with_respect_to` |
 | `get_FOO_order` / `set_FOO_order` | ✅ | `aget_FOO_order` (returns the list of primary keys) / `aset_FOO_order` on the model the ordering is relative to |
@@ -265,8 +273,9 @@ await book.tags.async_objects.aset([t1, t2])
 `aadd`/`aremove`/`aclear`/`aset`/`acreate`/`aget_or_create`/
 `aupdate_or_create` run on the task's connection and send `m2m_changed`
 with `asend()`. The plain `instance.<related>` manager (and its own `a*`
-methods) is still Django's thread-backed sync ORM. Generic relations are not
-covered.
+methods) is still Django's thread-backed sync ORM. `GenericRelation` gets the
+same `.async_objects` manager; the parent's `ContentType` must be cached
+first (`await aget_for_model(Model)`).
 
 ### Signals
 
@@ -298,6 +307,7 @@ relations joined instead of lazy-loading inside the widget.
 | piece | setting |
 | --- | --- |
 | `contrib.auth.AsyncModelBackend` | `AUTHENTICATION_BACKENDS` |
+| `aupdate_last_login` in place of Django's `update_last_login` receiver | `ASYNC_BACKEND_ASYNC_LAST_LOGIN = True` |
 | `contrib.sessions` (`SessionStore`), `contrib.sessions.cached_db` | `SESSION_ENGINE` |
 | `contrib.sessions.AsyncSessionMiddleware` | replaces `SessionMiddleware` |
 | `contrib.messages.AsyncMessageMiddleware` | replaces `MessageMiddleware` |
@@ -308,9 +318,11 @@ filters, search and pagination, add/change forms with inlines and
 many-to-many fields, delete confirmations with cascades, actions, history,
 autocomplete, raw-id widgets, list-editable rows, password change and logout
 run entirely on the task's async connection; the end-to-end tests run every
-request under a guard that fails on any synchronous cursor. Templates are
-still rendered synchronously (in the view's task) from pre-evaluated context,
-so a lazy query inside a template raises instead of running on a thread.
+request under a guard that fails on any synchronous cursor. Login needs
+`ASYNC_BACKEND_ASYNC_LAST_LOGIN = True`: Django's `user_logged_in` receiver
+saves `last_login` on the sync connection, which is a thread hop (and fails
+outright under `ASYNC_BACKEND_SYNC_HOPS = "error"`). Admin pages are rendered
+by the async template engine (see *Templates*), in the view's task.
 `date_hierarchy` and facet counts are precomputed by the async changelist.
 Wherever the admin renders `str(obj)` (the `__str__` changelist column, page
 titles, inline headers, delete confirmations, messages and log entries) a
@@ -502,7 +514,7 @@ transaction, as Django's own `DatabaseCache` does under `ATOMIC_REQUESTS`.
 
 ### Finding what still runs synchronously
 
-Three settings make the remaining sync paths visible or forbidden:
+These checks and settings make the remaining sync paths visible or forbidden:
 
 - **System checks.** `async_backend.W001`: a model overrides `save()`,
   `delete()`, `clean()`, `clean_fields()`, `full_clean()`,
@@ -518,8 +530,6 @@ Three settings make the remaining sync paths visible or forbidden:
   `async_backend.W003` does the same for `AsyncModelAdmin` subclasses that
   override `save_model()`, `delete_model()`, `save_formset()` or
   `save_related()` instead of the `a`-prefixed hooks the async admin calls.
-- **`Model.aclean_fields()`** mirrors `clean_fields()` with the foreign-key
-  existence check on the async connection; `async_full_clean()` uses it.
 - **Sync receivers inside a transaction.** `Signal.asend()` runs a sync
   receiver in a worker thread on the sync connection, where it cannot see
   the uncommitted row it was told about. `ASYNC_BACKEND_SYNC_RECEIVERS`:
@@ -559,6 +569,8 @@ connection:
   test that is rolled back afterwards. Class data is deep-copied per test
   (Django's `TestData` descriptor), and deferrable constraints are checked
   before the rollback.
+  Test methods must be `async def`, and there is no `assertRaisesMessage`
+  (use `assertRaisesRegex`).
 - `AsyncioTransactionTestCase` works like Django's `TransactionTestCase`:
   autocommit connections, `fixtures` loaded before every test, tables flushed
   after it.
