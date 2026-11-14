@@ -679,9 +679,10 @@ async def lifespan(state):
 - **pathsend.** When the server offers `http.response.pathsend` (granian
   does), a plain `FileResponse` over a file on disk is sent as its path and
   the server writes the file itself, instead of Django reading it in a
-  worker thread. Range/sliced files, `Content-Encoding` (GZip), HEAD and
-  non-200 responses are streamed as before. `ASYNC_BACKEND_PATHSEND = False`
-  turns it off.
+  worker thread. Precompressed files (WhiteNoise's `.gz`/`.br`) qualify;
+  range/sliced files, bodies rewritten on the way out (GZipMiddleware drops
+  `Content-Length`), HEAD and non-200 responses are streamed as before.
+  `ASYNC_BACKEND_PATHSEND = False` turns it off.
 - **Websockets** (`django_async_backend.contrib.websockets`):
   `WebsocketConsumer` with routing by `path()`/`re_path()` (kwargs in
   `scope["url_route"]`), and secure defaults: the handshake is refused

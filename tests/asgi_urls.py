@@ -5,6 +5,7 @@ from django.http import (
     HttpResponse,
     JsonResponse,
 )
+from django.middleware.gzip import GZipMiddleware
 from django.urls import path
 
 # Set by the tests to a real file on disk.
@@ -15,9 +16,19 @@ async def file_view(request):
     return FileResponse(open(FILE["path"], "rb"))
 
 
-async def encoded_file_view(request):
+async def gzipped_file_view(request):
+    # Compressed on the way out by the real middleware.
+    request.META["HTTP_ACCEPT_ENCODING"] = "gzip"
     response = FileResponse(open(FILE["path"], "rb"))
-    response["Content-Encoding"] = "gzip"  # as GZipMiddleware would
+    return GZipMiddleware(lambda request: response).process_response(
+        request, response
+    )
+
+
+async def precompressed_file_view(request):
+    # Like WhiteNoise serving app.css.gz: the bytes on disk are the body.
+    response = FileResponse(open(FILE["path"], "rb"))
+    response["Content-Encoding"] = "gzip"
     return response
 
 
@@ -37,7 +48,8 @@ async def state_view(request):
 
 urlpatterns = [
     path("file", file_view),
-    path("file-encoded", encoded_file_view),
+    path("file-gzipped", gzipped_file_view),
+    path("file-precompressed", precompressed_file_view),
     path("file-sliced", sliced_file_view),
     path("text", text_view),
     path("state", state_view),

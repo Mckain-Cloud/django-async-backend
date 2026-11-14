@@ -102,7 +102,7 @@ class PathsendTests(ASGITestCase):
 
     async def test_ineligible_responses_are_streamed(self):
         for path, method in (
-            ("/file-encoded", "GET"),  # body rewritten by middleware
+            ("/file-gzipped", "GET"),  # body rewritten by GZipMiddleware
             ("/file-sliced", "GET"),  # not at offset 0
             ("/text", "GET"),  # not a FileResponse
             ("/file", "HEAD"),
@@ -112,6 +112,16 @@ class PathsendTests(ASGITestCase):
                     self.app(), path, method=method, extensions={PATHSEND: {}}
                 )
                 self.assertNotIn(PATHSEND, [m["type"] for m in messages])
+
+    async def test_precompressed_file_is_sent_as_a_path(self):
+        # WhiteNoise's .gz/.br: Content-Encoding describes the file itself.
+        messages = await self.http(
+            self.app(), "/file-precompressed", extensions={PATHSEND: {}}
+        )
+        self.assertIn((b"Content-Encoding", b"gzip"), messages[0]["headers"])
+        self.assertEqual(
+            messages[1:], [{"type": PATHSEND, "path": asgi_urls.FILE["path"]}]
+        )
 
     async def test_setting_turns_it_off(self):
         with override_settings(ASYNC_BACKEND_PATHSEND=False):

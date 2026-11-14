@@ -51,9 +51,11 @@ shutdown. Settings:
 pathsend: a ``FileResponse`` over a regular file on disk is sent as a path
 and the server writes the file itself (granian does it in Rust) instead of
 Django reading it in a worker thread. Only the plain case qualifies: status
-200, not HEAD, no ``Content-Encoding`` (GZipMiddleware rewrites the
-stream), and a ``Content-Length`` equal to the file's size with the file at
-offset 0 (rules out ranges and slices). Everything else is sent as before.
+200, not HEAD, and a ``Content-Length`` equal to the file's size with the
+file at offset 0. That rules out ranges, slices and bodies rewritten on the
+way out (GZipMiddleware drops Content-Length from streaming responses),
+while precompressed files (WhiteNoise's .gz/.br, served with their own
+Content-Encoding) still qualify. Everything else is sent as before.
 """
 
 import asyncio
@@ -151,9 +153,7 @@ def _pathsend_path(response, scope):
         return None
     if not isinstance(response, FileResponse) or response.status_code != 200:
         return None
-    if scope.get("method") == "HEAD" or response.has_header(
-        "Content-Encoding"
-    ):
+    if scope.get("method") == "HEAD":
         return None
     filelike = getattr(response, "file_to_stream", None)
     name = getattr(filelike, "name", None)
@@ -164,6 +164,10 @@ def _pathsend_path(response, scope):
         at_start = filelike.tell() == 0
     except (AttributeError, OSError, ValueError):
         return None
+    # The Content-Length check also rules out a body rewritten on the way
+    # out: GZipMiddleware deletes Content-Length from streaming responses.
+    # A Content-Encoding on its own is fine: WhiteNoise serves precompressed
+    # .gz/.br files as they are on disk.
     if not at_start or response.get("Content-Length") != str(size):
         return None
     return name
