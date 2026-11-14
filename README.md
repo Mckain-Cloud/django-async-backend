@@ -639,6 +639,69 @@ values (`make_m2m=True`), reverse relations, generic foreign keys to saved
 instances and auto_now overrides, and recipes with `foreign_key()`,
 `related()` and `seq()`; everything is then saved with `async_save()`.
 
+### ASGI: lifespan, state, pathsend and websockets
+
+Django's `ASGIHandler` serves HTTP only: servers that send `lifespan` get
+"Django can only handle ASGI/HTTP connections, not lifespan." and carry on
+without it, and file responses are read in Python chunk by chunk.
+`django_async_backend.asgi.get_asgi_application()` wraps it:
+
+```python
+# asgi.py
+from django.urls import path
+from django_async_backend.asgi import get_asgi_application
+
+application = get_asgi_application(
+    lifespan="myproject.lifespan.lifespan",          # optional
+    websockets=[path("ws/queue", QueueConsumer)],    # optional
+)
+
+# myproject/lifespan.py
+@asynccontextmanager
+async def lifespan(state):
+    state["http"] = httpx.AsyncClient()     # one per worker
+    yield
+    await state["http"].aclose()
+```
+
+- **Lifespan, per worker.** Startup opens the pool of every alias with
+  `OPTIONS["pool"]` and waits for its `min_size` connections, so a worker
+  that can't reach its database reports `lifespan.startup.failed` instead of
+  failing its first requests; then the hook runs. Shutdown exits the hook
+  and closes the pools, so Postgres sees connections closed rather than
+  dropped. `ASYNC_BACKEND_LIFESPAN_DATABASES`: `"pools"` (default), `True`
+  (also connect once to each unpooled alias) or `False`. Servers that send
+  no lifespan (granian's `asginl`) get the startup lazily on the worker's
+  first request, and no shutdown.
+- **State.** The server copies the lifespan state into each request scope
+  (shallow: objects made at startup are shared by the worker's requests).
+  Views read `request.state`; websocket consumers `self.scope["state"]`.
+- **pathsend.** When the server offers `http.response.pathsend` (granian
+  does), a plain `FileResponse` over a file on disk is sent as its path and
+  the server writes the file itself, instead of Django reading it in a
+  worker thread. Range/sliced files, `Content-Encoding` (GZip), HEAD and
+  non-200 responses are streamed as before. `ASYNC_BACKEND_PATHSEND = False`
+  turns it off.
+- **Websockets** (`django_async_backend.contrib.websockets`):
+  `WebsocketConsumer` with routing by `path()`/`re_path()` (kwargs in
+  `scope["url_route"]`), and secure defaults: the handshake is refused
+  (HTTP 403) when a browser `Origin` isn't the socket's own host (compared
+  with the `Host` header; `allowed_origins = [...]` with `ALLOWED_HOSTS`
+  syntax for other sites; `ALLOWED_HOSTS` itself isn't used because it is
+  often `"*"` behind an ingress). This stops cross-site websocket hijacking,
+  which cookies *and TLS client certificates* otherwise allow. It is also
+  refused when `authenticate()`
+  (default: the session cookie through `SESSION_ENGINE` and Django's
+  `aget_user()`) finds no user (`login_required = False` for anonymous
+  sockets; `has_permission(user)` to narrow). `connect()`,
+  `receive_json()`/`receive_text()`/`receive_bytes()` and `disconnect()`
+  each run inside `async_acquire()` for the aliases in `databases`, so an
+  idle socket holds no connection; `{"type": "ping"}` is answered with
+  `{"type": "pong"}`; handler errors become `{"type": "error", "id", "error"}`
+  frames; `spawn(coro)` tasks are cancelled when the socket closes; each
+  socket runs in its own `ThreadSensitiveContext`. `WebsocketCommunicator`
+  drives a consumer from a test.
+
 ### Free-threaded Python
 
 The library and its test suite run on CPython 3.15t with the GIL disabled
