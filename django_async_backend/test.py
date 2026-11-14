@@ -38,7 +38,13 @@ def _refresh_connection_task_ownership_decorator(fn):
         task = asyncio.current_task()
         for connection in async_connections.all():
             connection._task = task
-        return await fn(*args, **kwargs)
+        try:
+            return await fn(*args, **kwargs)
+        finally:
+            # The next phase runs as another task. Releasing ownership before
+            # this one finishes also tells the orphan reaper (db/orphans.py)
+            # that the connections are being handed on, not abandoned.
+            release_task_ownership()
 
     inner._refreshes_task_ownership = True
     return inner

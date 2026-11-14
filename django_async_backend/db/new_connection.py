@@ -5,6 +5,7 @@ from inspect import iscoroutinefunction
 
 from django.db import DEFAULT_DB_ALIAS
 
+from django_async_backend.db.orphans import unwatch_owner
 from django_async_backend.db.utils import async_connections
 
 
@@ -29,6 +30,8 @@ async def _new_connection_scope():
         yield
     finally:
         opened = async_connections.all()
+        for conn in opened:
+            unwatch_owner(conn)
 
         close_task = asyncio.gather(*[conn.close() for conn in opened])
 
@@ -139,4 +142,9 @@ async def async_acquire(using=DEFAULT_DB_ALIAS, allow_outside_atomic=False):
             del async_connections[using]
         else:
             async_connections[using] = previous
+        # Discarded and closed here: stop watching first, so a cancellation
+        # landing during the (shielded) close doesn't leave the reaper to
+        # warn about it, and a long-lived task doesn't collect a callback per
+        # acquired connection.
+        unwatch_owner(conn)
         await asyncio.shield(conn.close())

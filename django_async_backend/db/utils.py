@@ -7,6 +7,7 @@ from django.db.utils import ConnectionHandler
 from django.db.utils import DatabaseErrorWrapper as _DatabaseErrorWrapper
 from django.db.utils import load_backend
 
+from django_async_backend.db.orphans import watch_owner
 from django_async_backend.utils.connection import BaseAsyncConnectionHandler
 
 
@@ -113,6 +114,8 @@ class AsyncConnectionHandler(BaseAsyncConnectionHandler):
 
         conn = backend.AsyncDatabaseWrapper(db, alias)
         conn._task = task
+        # Close it if the task finishes without closing it (see orphans.py).
+        watch_owner(conn, task)
         return conn
 
 

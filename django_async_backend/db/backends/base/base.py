@@ -652,8 +652,8 @@ class BaseAsyncDatabaseWrapper:
         wrapper built directly, the first one to use it). Raise an exception
         if the validation fails.
 
-        There is no opt-out: a task that needs its own transaction must get
-        its own connection via `async_new_connection()`.
+        There is no opt-out: a task that needs its own connection gets one
+        with `async_acquire()`.
         """
         try:
             current_task = asyncio.current_task()
@@ -669,9 +669,11 @@ class BaseAsyncDatabaseWrapper:
             raise RuntimeError(
                 "An async connection can only be used by the task that "
                 "owns it. The connection with alias '%s' is owned by "
-                "another task. Either do this work in the owning task, or "
-                "wrap it in async_new_connection() to give it a separate "
-                "connection." % self.alias
+                "another task (asyncio.create_task(), gather() and "
+                "TaskGroup run their work in new tasks). Either do this work "
+                "in the owning task, or wrap it in `async with "
+                "async_acquire('%s'):` to give this task its own "
+                "connection." % (self.alias, self.alias)
             )
 
     # ##### Miscellaneous #####

@@ -153,7 +153,17 @@ async with await connection.cursor() as cursor:
 > queries in parallel, wrap each task's work in `async_acquire()`, which opens
 > a connection for a task that doesn't own one. Do it sparingly, since each
 > such connection is a real one and a wide fan-out can exhaust the server's
-> limit.
+> limit (or, with a pool, its `max_size`: further tasks wait up to the pool's
+> `timeout`).
+>
+> The `RuntimeError` only fires when the parent already has a connection for
+> the alias, which inside a request it always does. Outside one (a websocket
+> consumer, a background task, a script), a child that is first to touch an
+> alias quietly gets a connection of its own that no middleware will ever
+> close. When its task finishes, the backend closes it (returning it to the
+> pool and rolling back any open transaction) and emits an
+> `UnclosedConnectionWarning`; wrap the child's work in `async_acquire()`
+> instead.
 
 ## Supported methods
 
