@@ -8,6 +8,7 @@ from django_async_backend.db.models import sql as async_sql
 from django_async_backend.db.models.prefetch import (
     get_prefetcher,
     prefetch_one_level,
+    wrap_prefetch_related_objects,
 )
 from django_async_backend.db.models.sync_only import install_sync_only_stubs
 from django_async_backend.db.transaction import (
@@ -2676,6 +2677,11 @@ def get_related_populators(klass_info, select, db, fetch_mode):
         rel_cls = RelatedPopulator(rel_klass_info, select, db, fetch_mode)
         iterators.append(rel_cls)
     return iterators
+
+
+prefetch_related_objects = wrap_prefetch_related_objects(
+    prefetch_related_objects
+)
 
 
 aprefetch_related_objects = prefetch_related_objects

@@ -211,10 +211,23 @@ Legend: ✅ supported · ❌ not supported · ⚠️ supported with caveats
 | `Model.objects.aiterator`           | ✅        | server-side cursor; closed as soon as the consumer stops iterating |
 | `Model.objects.raw`                 | ✅        | returns the async `RawQuerySet` below |
 
-`GenericForeignKey` prefetches run one target query per content type,
-sequentially on the task's connection. ContentType cache misses are resolved
-asynchronously. For custom prefetches, use
-`django_async_backend.db.models.query.Prefetch` with an async queryset.
+`GenericForeignKey` prefetches run one target query per content type on the
+task's connection. ContentType cache misses are resolved asynchronously. For
+custom prefetches, use `django_async_backend.db.models.query.Prefetch` with an
+async queryset.
+
+**Pipelined prefetches.** Independent prefetch queries are sent in one round
+trip with psycopg's pipeline mode: the per-content-type queries of a
+`GenericForeignKey`, and sibling lookups at the top level
+(`prefetch_related("author", "publisher")`). The server still runs them one
+after another; only the waiting between them goes away, so the gain grows
+with database latency (in a benchmark at a 427 µs round trip: 8–26% per
+prefetched queryset; at 164 µs: 2–6%; on loopback: none).
+`django_async_backend.db.models.pipeline.aevaluate_pipelined(querysets)` does
+the same for any list of async querysets. `ASYNC_BACKEND_PIPELINE` turns it
+on or off; it defaults to off on Windows, where a pipelined batch to a Docker
+Desktop Postgres stalls for ~40 ms. Statements in one batch share an implicit
+transaction, so an error in one aborts the rest; only reads are batched.
 
 ### Dunder methods
 

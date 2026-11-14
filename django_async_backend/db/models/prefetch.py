@@ -18,6 +18,7 @@ queryset per target model. Generic relations warm Django's ContentType cache
 before constructing the related manager. Custom descriptors remain unsupported.
 """
 
+import contextvars
 import copy
 from collections import defaultdict
 
@@ -25,6 +26,7 @@ from django.apps import apps
 from django.core import exceptions
 from django.db import NotSupportedError
 from django.db.models import Q
+from django.db.models.constants import LOOKUP_SEP
 from django.db.models.expressions import ColPairs
 from django.db.models.fields.related_descriptors import (
     ForwardManyToOneDescriptor,
@@ -34,6 +36,10 @@ from django.db.models.fields.related_descriptors import (
 from django.db.models.fields.tuple_lookups import TupleIn
 from django.db.models.query import get_prefetcher as django_get_prefetcher
 
+from django_async_backend.db.models.pipeline import (
+    aevaluate_pipelined,
+    pipeline_enabled,
+)
 from django_async_backend.utils.contenttypes import (
     aget_for_id,
     aget_for_model,
@@ -305,8 +311,10 @@ async def _generic_foreign_key(descriptor, instances, querysets):
         )
 
     async def related_objects():
-        # Like Django, let each target queryset perform its own nested
-        # prefetches. Different models may have different nested lookups.
+        # One query per content type, all independent: send them in one
+        # round trip. Like Django, each target queryset then performs its
+        # own nested prefetches (different models may have different ones).
+        await aevaluate_pipelined(related_querysets)
         for queryset in related_querysets:
             async for obj in queryset:
                 yield obj
@@ -425,27 +433,17 @@ async def _get_prefetch_querysets(prefetcher, instances, querysets):
     return _unsupported(prefetcher)
 
 
-async def prefetch_one_level(instances, prefetcher, lookup, level):
+async def _aplan_one_level(instances, prefetcher, lookup, level):
     """
-    Helper function for prefetch_related_objects().
+    Build (but don't evaluate) the related queryset for one prefetch level.
 
-    Run prefetches on all instances using the prefetcher object,
-    assigning results to relevant caches in instance.
-
-    Return the prefetched objects along with any additional prefetches that
-    must be done due to prefetch_related lookups found from default managers.
+    Return the seven-tuple of _get_prefetch_querysets() and the additional
+    lookups stripped from the queryset.
     """
-    (
-        rel_qs,
-        rel_obj_attr,
-        instance_attr,
-        single,
-        cache_name,
-        is_descriptor,
-        post_evaluate,
-    ) = await _get_prefetch_querysets(
+    plan = await _get_prefetch_querysets(
         prefetcher, instances, lookup.get_current_querysets(level)
     )
+    rel_qs = plan[0]
     # We have to handle the possibility that the QuerySet we just got back
     # contains some prefetch_related lookups. We don't want to trigger the
     # prefetch_related functionality by evaluating the query. Rather, we need
@@ -463,6 +461,141 @@ async def prefetch_one_level(instances, prefetcher, lookup, level):
         # instance, so we access an internal instead of using public interface
         # for performance reasons.
         rel_qs._prefetch_related_lookups = ()
+    return plan, additional_lookups
+
+
+# Top-level levels planned and evaluated ahead by aprefetch_top_level(),
+# keyed by prefetch_to; prefetch_one_level() consumes them.
+_planned_levels = contextvars.ContextVar(
+    "django_async_backend_planned_levels", default=None
+)
+
+
+def _take_planned(instances, lookup, level):
+    planned = _planned_levels.get()
+    if not planned or level != 0:
+        return None
+    entry = planned.get(lookup.get_current_prefetch_to(level))
+    if entry is None:
+        return None
+    planned_instances, plan, additional_lookups = entry
+    if len(planned_instances) != len(instances) or any(
+        a is not b for a, b in zip(planned_instances, instances)
+    ):
+        return None
+    del planned[lookup.get_current_prefetch_to(level)]
+    return plan, additional_lookups
+
+
+async def aprefetch_top_level(model_instances, related_lookups):
+    """
+    Plan the first level of every lookup in ``related_lookups`` and send the
+    resulting querysets in one pipeline, so ``prefetch_related("a", "b",
+    "c")`` costs one round trip for its three queries instead of three.
+
+    Mirrors the preamble of prefetch_related_objects() for level 0 (same
+    processing order, same skips). A lookup this can't plan is left to the
+    normal loop, which also raises any error for it. Return the planned
+    levels for prefetch_one_level() to consume.
+    """
+    planned = {}
+    if not model_instances or not pipeline_enabled():
+        return planned
+
+    for obj in model_instances:
+        if not hasattr(obj, "_prefetched_objects_cache"):
+            try:
+                obj._prefetched_objects_cache = {}
+            except (AttributeError, TypeError):
+                return planned
+
+    from django_async_backend.db.models.query import normalize_prefetch_lookups
+
+    first_obj = next(iter(model_instances))
+    lookups = normalize_prefetch_lookups(reversed(related_lookups))
+    candidates = []
+    seen = set()
+    # prefetch_related_objects() pops from the end of this list.
+    for lookup in reversed(lookups):
+        prefetch_to = lookup.get_current_prefetch_to(0)
+        if prefetch_to in seen:
+            continue
+        seen.add(prefetch_to)
+        through_attr = lookup.prefetch_through.split(LOOKUP_SEP)[0]
+        to_attr = lookup.get_current_to_attr(0)[0]
+        prefetcher, _descriptor, attr_found, is_fetched = await get_prefetcher(
+            first_obj, through_attr, to_attr
+        )
+        if not attr_found or prefetcher is None:
+            continue
+        obj_to_fetch = [obj for obj in model_instances if not is_fetched(obj)]
+        if obj_to_fetch:
+            candidates.append((prefetch_to, obj_to_fetch, prefetcher, lookup))
+
+    if len(candidates) < 2:
+        return planned
+
+    for prefetch_to, obj_to_fetch, prefetcher, lookup in candidates:
+        plan, additional_lookups = await _aplan_one_level(
+            obj_to_fetch, prefetcher, lookup, 0
+        )
+        planned[prefetch_to] = (obj_to_fetch, plan, additional_lookups)
+
+    await aevaluate_pipelined([entry[1][0] for entry in planned.values()])
+    return planned
+
+
+def wrap_prefetch_related_objects(prefetch_related_objects):
+    """Run aprefetch_top_level() ahead of the generated loop."""
+
+    async def pipelined_prefetch_related_objects(
+        model_instances, *related_lookups
+    ):
+        if not model_instances:
+            return
+        token = _planned_levels.set(
+            await aprefetch_top_level(model_instances, related_lookups)
+        )
+        try:
+            return await prefetch_related_objects(
+                model_instances, *related_lookups
+            )
+        finally:
+            _planned_levels.reset(token)
+
+    pipelined_prefetch_related_objects.__wrapped__ = prefetch_related_objects
+    pipelined_prefetch_related_objects.__name__ = "prefetch_related_objects"
+    pipelined_prefetch_related_objects.__qualname__ = (
+        "prefetch_related_objects"
+    )
+    return pipelined_prefetch_related_objects
+
+
+async def prefetch_one_level(instances, prefetcher, lookup, level):
+    """
+    Helper function for prefetch_related_objects().
+
+    Run prefetches on all instances using the prefetcher object,
+    assigning results to relevant caches in instance.
+
+    Return the prefetched objects along with any additional prefetches that
+    must be done due to prefetch_related lookups found from default managers.
+    """
+    planned = _take_planned(instances, lookup, level)
+    if planned is None:
+        planned = await _aplan_one_level(instances, prefetcher, lookup, level)
+    (
+        (
+            rel_qs,
+            rel_obj_attr,
+            instance_attr,
+            single,
+            cache_name,
+            is_descriptor,
+            post_evaluate,
+        ),
+        additional_lookups,
+    ) = planned
 
     all_related_objects = [rel_obj async for rel_obj in rel_qs]
     # The sync descriptors fill the reverse relation caches while iterating;
