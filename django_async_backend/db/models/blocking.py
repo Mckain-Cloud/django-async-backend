@@ -32,11 +32,20 @@ in the thread:
 * Sync signal receivers fired by such a write are called inline, in the
   transaction (``django_async_backend.dispatch``).
 
-Not covered: ``iterator()``, ``refresh_from_db()``, model validation
-(``full_clean()`` / ``validate_unique()``), ``select_for_update()`` on a
-queryset without the mode, raw ``connection.cursor()``, and the rest of
-``django.db.transaction`` (``savepoint()``, ``set_rollback()``...). Indexing
-an *async* queryset (``qs[0]``) still returns an awaitable.
+* ``Model.refresh_from_db()`` and model validation (``clean_fields()``,
+  ``validate_unique()``, ``validate_constraints()``, hence
+  ``full_clean()``) run their async twins.
+* Sync ``ModelForm``s: a ``ModelChoiceField`` hands out its queryset in
+  ``FETCH_BLOCKING`` mode and a many-to-many field reads its initial
+  value that way, so rendering, ``is_valid()`` and ``save()`` work.
+
+``iterator()`` on a ``FETCH_BLOCKING`` queryset returns the rows of one
+blocking query instead of streaming them.
+
+Not covered: model formsets, a queryset without the mode (including
+``select_for_update()`` on one), raw ``connection.cursor()``, and the
+rest of ``django.db.transaction`` (``savepoint()``, ``set_rollback()``...).
+Indexing an *async* queryset (``qs[0]``) still returns an awaitable.
 """
 
 from contextvars import ContextVar
@@ -47,22 +56,38 @@ from django.db import (
     transaction,
 )
 from django.db.backends.base.base import BaseDatabaseWrapper
-from django.db.models import Model
+from django.db.models import (
+    ManyToManyField,
+    Model,
+)
 from django.db.models import query as django_query
+from django.forms.models import ModelChoiceField
 
 from django_async_backend.db import async_connections
 from django_async_backend.db.blocking import run_blocking
 from django_async_backend.db.models import query as async_query
-from django_async_backend.db.models.convert import to_async_queryset
+from django_async_backend.db.models.convert import (
+    is_sync_queryset,
+    to_async_queryset,
+)
 from django_async_backend.db.models.fetch_modes import (
+    FETCH_BLOCKING,
     FetchBlocking,
     in_event_loop,
+    in_lazy_fetch,
 )
 from django_async_backend.db.models.sync_only import SYNC_ONLY
 from django_async_backend.db.transaction import async_atomic
 
-# Streaming needs a suspended generator between rows; not served blocking.
+# Streaming needs a suspended generator between rows: iterator() is served
+# from one blocking query instead (see _rows()).
 _UNBRIDGED = {"iterator", "_iterator"}
+# Model method -> the async twin on Model that does the same work.
+_MODEL_TWINS = {
+    "clean_fields": "aclean_fields",
+    "validate_unique": "async_validate_unique",
+    "validate_constraints": "async_validate_constraints",
+}
 _TWINS = {name: "a" + name for name in SYNC_ONLY if name not in _UNBRIDGED}
 _METHOD_ATTRS = ("alters_data", "queryset_only", "__doc__")
 
@@ -99,10 +124,11 @@ def _evaluated(queryset):
 
 def _patch(cls, name, new):
     original = cls.__dict__.get(name)
-    for attr in _METHOD_ATTRS:
-        if hasattr(original, attr):
-            setattr(new, attr, getattr(original, attr))
-    new.__name__ = name
+    if not isinstance(new, property):
+        for attr in _METHOD_ATTRS:
+            if hasattr(original, attr):
+                setattr(new, attr, getattr(original, attr))
+        new.__name__ = name
     _saved.append((cls, name, original))
     setattr(cls, name, new)
 
@@ -193,6 +219,88 @@ def _model_delete(original):
     return delete
 
 
+def _model_validation(original, twin):
+    def method(self, *args, **kwargs):
+        if not in_event_loop():
+            return original(self, *args, **kwargs)
+        alias = router.db_for_write(self.__class__, instance=self)
+        return run_blocking(getattr(Model, twin)(self, *args, **kwargs), alias)
+
+    return method
+
+
+def _model_refresh(original):
+    def refresh_from_db(self, using=None, fields=None, from_queryset=None):
+        # A lazy load through FETCH_ONE arrives here too; that one must
+        # keep raising unless the instance opted in.
+        if not in_event_loop() or in_lazy_fetch():
+            return original(
+                self, using=using, fields=fields, from_queryset=from_queryset
+            )
+        if from_queryset is not None:
+            alias = from_queryset.db
+        else:
+            alias = using or self._state.db or DEFAULT_DB_ALIAS
+        return run_blocking(
+            Model.async_refresh_from_db(
+                self, using=using, fields=fields, from_queryset=from_queryset
+            ),
+            alias,
+        )
+
+    return refresh_from_db
+
+
+def _rows(queryset):
+    """iterator(): every row from one blocking query, not a stream."""
+    queryset = to_async_queryset(queryset._chain())
+    return iter(_evaluated(queryset))
+
+
+def _sync_iterator(original):
+    def iterator(self, chunk_size=None):
+        if is_blocking(self):
+            return _rows(self)
+        return original(self, chunk_size=chunk_size)
+
+    return iterator
+
+
+def _async_iterator(stub):
+    def iterator(self, *args, **kwargs):
+        if is_blocking(self):
+            return _rows(self)
+        return stub(self, *args, **kwargs)
+
+    return iterator
+
+
+def _choice_queryset(original):
+    def _get_queryset(self):
+        queryset = original(self)
+        if (
+            queryset is not None
+            and writes_block()
+            and not hasattr(self, "aload_choices")
+            and is_sync_queryset(queryset)
+            and not isinstance(queryset._fetch_mode, FetchBlocking)
+        ):
+            return queryset.fetch_mode(FETCH_BLOCKING)
+        return queryset
+
+    return _get_queryset
+
+
+def _m2m_value(original):
+    def value_from_object(self, obj):
+        if in_event_loop() and obj._is_pk_set():
+            manager = getattr(obj, self.attname)
+            return list(manager.all().fetch_mode(FETCH_BLOCKING))
+        return original(self, obj)
+
+    return value_from_object
+
+
 def _atomic_enter(original):
     def __enter__(self):
         if not in_event_loop():
@@ -251,7 +359,26 @@ def install():
         if original is not None:
             _patch(sync_cls, name, _sync_method(original, twin))
 
+    _patch(async_cls, "iterator", _async_iterator(async_cls.iterator))
+    _patch(sync_cls, "iterator", _sync_iterator(sync_cls.iterator))
+
     _patch(Model, "save", _model_save(Model.save))
+    for name, twin in _MODEL_TWINS.items():
+        _patch(Model, name, _model_validation(getattr(Model, name), twin))
+    _patch(Model, "refresh_from_db", _model_refresh(Model.refresh_from_db))
+    _patch(
+        ModelChoiceField,
+        "queryset",
+        property(
+            _choice_queryset(ModelChoiceField._get_queryset),
+            ModelChoiceField._set_queryset,
+        ),
+    )
+    _patch(
+        ManyToManyField,
+        "value_from_object",
+        _m2m_value(ManyToManyField.value_from_object),
+    )
     _patch(Model, "delete", _model_delete(Model.delete))
     _patch(
         transaction.Atomic,

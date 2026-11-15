@@ -2,7 +2,11 @@ import asyncio
 from unittest import mock
 
 from asgiref.sync import sync_to_async
-from django.core.exceptions import SynchronousOnlyOperation
+from django import forms
+from django.core.exceptions import (
+    SynchronousOnlyOperation,
+    ValidationError,
+)
 from django.core.paginator import Paginator
 from django.db import (
     connections,
@@ -21,7 +25,11 @@ from django.template import (
 from test_app.models import (
     M2MOwnerModel,
     M2MTagModel,
+    SelectRelatedAuthorModel,
+    SelectRelatedBookModel,
+    SelectRelatedPublisherModel,
     TestModel,
+    TotalOrderingModel,
 )
 
 from django_async_backend.db import async_connections
@@ -471,6 +479,164 @@ class SyncWriteCommitTests(_Installed, AsyncioTransactionTestCase):
         self.assertTrue(await TestModel.async_objects.filter(pk=pk).aexists())
 
 
+class BookForm(forms.ModelForm):
+    class Meta:
+        model = SelectRelatedBookModel
+        fields = ["title", "author", "publisher"]
+
+
+class OwnerForm(forms.ModelForm):
+    class Meta:
+        model = M2MOwnerModel
+        fields = ["name", "tags"]
+
+
+class SyncModelValidationTests(_Installed, AsyncioTestCase):
+    async def asyncSetUp(self):
+        db_blocking.reset_reported()
+
+    async def test_refresh_from_db(self):
+        obj = await TestModel.async_objects.acreate(name="old")
+        await TestModel.async_objects.filter(pk=obj.pk).aupdate(name="new")
+        async with self.assertNumQueries(1):
+            obj.refresh_from_db()
+        self.assertEqual(obj.name, "new")
+        await TestModel.async_objects.filter(pk=obj.pk).aupdate(name="newer")
+        obj.refresh_from_db(fields=["name"])
+        self.assertEqual(obj.name, "newer")
+
+    async def test_lazy_load_without_the_mode_still_raises(self):
+        created = await TestModel.async_objects.acreate(name="row")
+        obj = await TestModel.async_objects.defer("name").aget(pk=created.pk)
+        with self.assertRaisesRegex(SynchronousOnlyOperation, "afetch"):
+            obj.name
+        obj.refresh_from_db()
+        self.assertEqual(obj.name, "row")
+
+    async def test_full_clean_checks_foreign_keys_and_uniqueness(self):
+        await TestModel.async_objects.acreate(name="taken")
+        with self.assertRaises(ValidationError) as cm:
+            TestModel(name="taken", value=1, relative_id=10**9).full_clean()
+        self.assertEqual(set(cm.exception.message_dict), {"name", "relative"})
+        TestModel(name="free", value=1).full_clean()
+
+    async def test_validate_constraints(self):
+        await TotalOrderingModel.async_objects.acreate(
+            headline="a", barcode="same"
+        )
+        candidate = TotalOrderingModel(headline="b", barcode="same")
+        with self.assertRaises(ValidationError):
+            candidate.validate_constraints()
+        TotalOrderingModel(
+            headline="b", barcode="other"
+        ).validate_constraints()
+
+    async def test_iterator_returns_the_rows(self):
+        for name in ("a", "b", "c"):
+            await TestModel.async_objects.acreate(name=name)
+        sync_rows = TestModel.objects.fetch_mode(FETCH_BLOCKING).order_by(
+            "name"
+        )
+        async_rows = TestModel.async_objects.fetch_mode(
+            FETCH_BLOCKING
+        ).order_by("name")
+        async with self.assertNumQueries(2):
+            self.assertEqual(
+                [o.name for o in sync_rows.iterator(chunk_size=1)],
+                ["a", "b", "c"],
+            )
+            self.assertEqual(
+                [o.name for o in async_rows.iterator()], ["a", "b", "c"]
+            )
+        with self.assertRaises(SynchronousOnlyOperation):
+            list(TestModel.objects.iterator())
+
+
+class SyncModelFormTests(_Installed, AsyncioTestCase):
+    async def asyncSetUp(self):
+        db_blocking.reset_reported()
+        self.author = await SelectRelatedAuthorModel.async_objects.acreate(
+            name="Ann"
+        )
+        self.publisher = (
+            await SelectRelatedPublisherModel.async_objects.acreate(name="Pub")
+        )
+
+    async def test_render_lists_the_choices(self):
+        html = BookForm().as_p()
+        self.assertIn('<option value="%d">' % self.author.pk, html)
+        self.assertIn('<option value="%d">' % self.publisher.pk, html)
+
+    async def test_valid_form_saves(self):
+        form = BookForm(
+            {
+                "title": "Book",
+                "author": str(self.author.pk),
+                "publisher": str(self.publisher.pk),
+            }
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+        book = form.save()
+        saved = await SelectRelatedBookModel.async_objects.select_related(
+            "author", "publisher"
+        ).aget(pk=book.pk)
+        self.assertEqual(
+            (saved.title, saved.author.name, saved.publisher.name),
+            ("Book", "Ann", "Pub"),
+        )
+
+    async def test_invalid_choice_and_unique_errors(self):
+        await SelectRelatedBookModel.async_objects.acreate(
+            title="Taken", author=self.author
+        )
+        form = BookForm({"title": "Taken", "author": "999999999"})
+        self.assertFalse(form.is_valid())
+        self.assertIn("valid choice", str(form.errors["author"]))
+        form = BookForm({"title": "Taken", "author": str(self.author.pk)})
+        self.assertFalse(form.is_valid())
+        self.assertIn("already exists", str(form.errors["title"]))
+
+    async def test_edit_form_with_many_to_many(self):
+        tags = [
+            await M2MTagModel.async_objects.acreate(name="tag-%d" % i)
+            for i in range(3)
+        ]
+        owner = await M2MOwnerModel.async_objects.acreate(name="owner")
+        await owner.tags.async_objects.aadd(tags[0])
+
+        form = OwnerForm(instance=owner)
+        self.assertEqual(form.initial["tags"], [tags[0]])
+        self.assertIn("selected", form.as_p())
+
+        form = OwnerForm(
+            {"name": "renamed", "tags": [str(tags[1].pk), str(tags[2].pk)]},
+            instance=owner,
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+        form.save()
+        self.assertEqual(
+            (await M2MOwnerModel.async_objects.aget(pk=owner.pk)).name,
+            "renamed",
+        )
+        self.assertEqual(
+            [t.name async for t in owner.tags.async_objects.order_by("name")],
+            ["tag-1", "tag-2"],
+        )
+
+    async def test_form_in_a_sync_atomic_block_rolls_back(self):
+        with self.assertRaises(RuntimeError):
+            with transaction.atomic():
+                form = BookForm(
+                    {"title": "Book", "author": str(self.author.pk)}
+                )
+                self.assertTrue(form.is_valid(), form.errors)
+                form.save()
+                raise RuntimeError
+        self.assertEqual(
+            await SelectRelatedBookModel.async_objects.acount(), 0
+        )
+
+
 class NotInstalledTests(AsyncioTestCase):
     async def test_writes_still_raise(self):
         owner = await M2MOwnerModel.async_objects.acreate(name="owner")
@@ -486,3 +652,9 @@ class NotInstalledTests(AsyncioTestCase):
                 pass
         with self.assertRaises(SynchronousOnlyOperation):
             transaction.on_commit(lambda: None)
+        with self.assertRaises(SynchronousOnlyOperation):
+            owner.refresh_from_db()
+        with self.assertRaises(SynchronousOnlyOperation):
+            TestModel(name="owner").full_clean()
+        with self.assertRaises(SynchronousOnlyOperation):
+            BookForm().as_p()

@@ -23,6 +23,7 @@ an N+1 that stalls every request on the worker, not just this one.
 """
 
 import asyncio
+import threading
 
 from django.core.exceptions import SynchronousOnlyOperation
 from django.db.models.fetch_modes import (
@@ -34,6 +35,18 @@ from django.db.models.fetch_modes import (
 from django.db.models.query_utils import DeferredAttribute
 
 __all__ = ["FETCH_BLOCKING", "FetchBlocking"]
+
+_lazy = threading.local()
+
+
+def in_lazy_fetch():
+    """Is one of Django's own fetch modes loading a value right now?
+
+    ``FETCH_ONE`` loads a deferred field with ``refresh_from_db()``. The
+    blocking bridge for that method steps aside here, so a lazy load on
+    an instance that did not opt in keeps raising.
+    """
+    return getattr(_lazy, "depth", 0) > 0
 
 
 def fetcher_name(fetcher):
@@ -76,6 +89,7 @@ FETCH_BLOCKING = FetchBlocking()
 
 def _explained(fetch):
     def explained_fetch(self, fetcher, instance):
+        _lazy.depth = getattr(_lazy, "depth", 0) + 1
         try:
             return fetch(self, fetcher, instance)
         except SynchronousOnlyOperation:
@@ -91,6 +105,8 @@ def _explained(fetch):
                 "access instead, blocking the event loop for the query."
                 % (instance.__class__.__qualname__, name, name)
             ) from None
+        finally:
+            _lazy.depth -= 1
 
     explained_fetch._async_backend_explained = True
     return explained_fetch

@@ -33,7 +33,7 @@ is pinned to the Django feature release it was generated against.
 | `6.1.5`              | `6.1.3` |
 | `6.1.3`              | `6.1.0` |
 
-Builds from the Mckain-Cloud `lab` branch carry a local label (`6.1.5+lab2`)
+Builds from the Mckain-Cloud `lab` branch carry a local label (`6.1.5+lab5`)
 so pins such as `django-async-backend==6.1.5` still match them.
 
 Part of the ORM layer is generated from Django's own source, so a Django feature
@@ -515,16 +515,27 @@ old.delete()                               # cascades through the async collecto
   the first database use in a task must be awaited: any async query, or
   `await async_connections["default"].ensure_connection()`. Otherwise the
   call raises `BlockingQueryError` naming that fix.
-- **Not covered:** `iterator()`, `refresh_from_db()`, model validation
-  (`full_clean()`, `validate_unique()`, so a sync `ModelForm.is_valid()`),
-  raw `connection.cursor()`, and the rest of `django.db.transaction`
-  (`savepoint()`, `set_rollback()`, ...) still go to the sync connection and
-  raise in a task.
+- **`refresh_from_db()` and model validation** (`clean_fields()`,
+  `validate_unique()`, `validate_constraints()`, and so `full_clean()`) run
+  their async twins. A lazy load on an object without the mode still raises,
+  although Django implements it with `refresh_from_db()`.
+- **Sync `ModelForm`s** work end to end: rendering (choices), `is_valid()`
+  (choice lookups, foreign-key, unique and constraint checks), the initial
+  value of a many-to-many field, and `save()`. For that, a
+  `ModelChoiceField` hands out its queryset in `FETCH_BLOCKING` mode while
+  the setting is on, so the objects it returns lazy-load by blocking too.
+- **`iterator()`** on a `FETCH_BLOCKING` queryset returns the rows of one
+  blocking query; it does not stream (`aiterator()` does).
+- **Not covered:** model formsets, raw `connection.cursor()`, and the rest
+  of `django.db.transaction` (`savepoint()`, `set_rollback()`, ...) still go
+  to the sync connection and raise in a task.
 
-The setting patches `QuerySet`, `Model.save()` / `delete()`,
-`transaction.Atomic` and `BaseDatabaseWrapper.on_commit` at startup; each
-defers to the original when no event loop is running in the thread (and,
-for reads, unless the queryset has the mode).
+The setting patches `QuerySet`, a handful of `Model` methods (`save()`,
+`delete()`, `refresh_from_db()`, the three validation methods),
+`transaction.Atomic`, `BaseDatabaseWrapper.on_commit`,
+`ModelChoiceField.queryset` and `ManyToManyField.value_from_object` at
+startup; each defers to the original when no event loop is running in the
+thread (and, for reads, unless the queryset has the mode).
 
 ### Custom descriptors
 
