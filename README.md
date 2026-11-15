@@ -668,8 +668,9 @@ async def lifespan(state):
   `OPTIONS["pool"]` and waits for its `min_size` connections, so a worker
   that can't reach its database reports `lifespan.startup.failed` instead of
   failing its first requests; then the hook runs. Shutdown exits the hook
-  and closes the pools, so Postgres sees connections closed rather than
-  dropped. `ASYNC_BACKEND_LIFESPAN_DATABASES`: `"pools"` (default), `True`
+  and closes the pools explicitly (a graceful worker exit closes psycopg
+  connections anyway; this makes it deterministic and runs before the
+  hook's own teardown is gone). `ASYNC_BACKEND_LIFESPAN_DATABASES`: `"pools"` (default), `True`
   (also connect once to each unpooled alias) or `False`. Servers that send
   no lifespan (granian's `asginl`) get the startup lazily on the worker's
   first request, and no shutdown.

@@ -29,8 +29,9 @@ Lifespan (per worker event loop):
           yield
           await state["http"].aclose()
 
-* **Shutdown** exits the hook and closes the worker's pools, so Postgres
-  sees its connections closed instead of dropped with the process.
+* **Shutdown** exits the hook and closes the worker's pools explicitly. A
+  graceful worker exit closes psycopg connections anyway (checked: Postgres
+  logs a clean disconnection either way); this makes it deterministic.
 
 * **State**: the server copies the lifespan state into every request scope
   (shallow, so objects created at startup are shared by the worker's
