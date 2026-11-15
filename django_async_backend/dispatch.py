@@ -13,7 +13,11 @@ runner with a sequential one that awaits each receiver in the calling task,
 in registration order. Applied on startup unless
 ``ASYNC_BACKEND_SEQUENTIAL_SIGNAL_RECEIVERS`` is ``False``.
 
-Sync receivers still run through ``sync_to_async()`` on the sync connection,
+During a blocking query (``django_async_backend.db.blocking``, e.g. a sync
+``Model.save()`` under ``ASYNC_BACKEND_BLOCKING_QUERYSETS``) sync receivers
+are called inline instead, in the sender's task and transaction.
+
+Otherwise sync receivers run through ``sync_to_async()`` on the sync connection,
 i.e. outside the async transaction, where they cannot see the row they were
 notified about. ``ASYNC_BACKEND_SYNC_RECEIVERS`` decides what happens when
 that occurs *inside an ``async_atomic()`` block*: ``"warn"`` (default) emits
@@ -106,6 +110,12 @@ def _policed_sync_to_async(fn, *args, **kwargs):
         return wrapped
 
     async def send():
+        from django_async_backend.db import blocking
+
+        if blocking.is_running():
+            # A blocking save()/delete() cannot wait for a worker thread.
+            # Run the sync receivers here: same task, same transaction.
+            return fn()
         _police(fn)
         return await wrapped()
 

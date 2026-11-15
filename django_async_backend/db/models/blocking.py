@@ -17,14 +17,40 @@ so ``obj.books.all()`` is covered once ``obj`` came from a ``FETCH_BLOCKING``
 queryset. Every other queryset behaves as before, and so does a worker thread
 (``sync_to_async``), where there is no loop to block.
 
-Not covered: ``Model.save()`` / ``delete()``, the related managers' ``add()``
-/ ``remove()`` / ``set()`` / ``clear()``, ``iterator()`` and sync
-``transaction.atomic()``, which still use the sync connection. Indexing an
-*async* queryset (``qs[0]``) still returns an awaitable.
+Writes are explicit calls rather than something a template can trigger by
+accident, and a new instance has no queryset to inherit a mode from, so with
+the setting on they block for any object, whenever an event loop is running
+in the thread:
+
+* ``Model.save()`` / ``Model.delete()`` run Django's ``async_save()`` /
+  ``async_delete()`` body after the model's own sync overrides, so a model's
+  ``async_save()`` override is *not* called on top of its ``save()``.
+* Related managers' ``add()`` / ``remove()`` / ``clear()`` / ``set()`` run the
+  ``async_objects`` twins (wired in ``related.bridge_related_manager``).
+* ``transaction.atomic()`` enters ``async_atomic()`` on the task's
+  connection, and ``transaction.on_commit()`` registers there.
+* Sync signal receivers fired by such a write are called inline, in the
+  transaction (``django_async_backend.dispatch``).
+
+Not covered: ``iterator()``, ``refresh_from_db()``, model validation
+(``full_clean()`` / ``validate_unique()``), ``select_for_update()`` on a
+queryset without the mode, raw ``connection.cursor()``, and the rest of
+``django.db.transaction`` (``savepoint()``, ``set_rollback()``...). Indexing
+an *async* queryset (``qs[0]``) still returns an awaitable.
 """
 
+from contextvars import ContextVar
+
+from django.db import (
+    DEFAULT_DB_ALIAS,
+    router,
+    transaction,
+)
+from django.db.backends.base.base import BaseDatabaseWrapper
+from django.db.models import Model
 from django.db.models import query as django_query
 
+from django_async_backend.db import async_connections
 from django_async_backend.db.blocking import run_blocking
 from django_async_backend.db.models import query as async_query
 from django_async_backend.db.models.convert import to_async_queryset
@@ -33,6 +59,7 @@ from django_async_backend.db.models.fetch_modes import (
     in_event_loop,
 )
 from django_async_backend.db.models.sync_only import SYNC_ONLY
+from django_async_backend.db.transaction import async_atomic
 
 # Streaming needs a suspended generator between rows; not served blocking.
 _UNBRIDGED = {"iterator", "_iterator"}
@@ -40,6 +67,21 @@ _TWINS = {name: "a" + name for name in SYNC_ONLY if name not in _UNBRIDGED}
 _METHOD_ATTRS = ("alters_data", "queryset_only", "__doc__")
 
 _saved = []
+# (Atomic, AsyncAtomic, alias) for each sync atomic() this task has open.
+_atomics = ContextVar("async_backend_blocking_atomics", default=())
+
+
+def writes_block():
+    """Should a sync write in this thread run on the async connection?"""
+    return bool(_saved) and in_event_loop()
+
+
+def is_blocking_instance(instance):
+    return (
+        bool(_saved)
+        and isinstance(instance._state.fetch_mode, FetchBlocking)
+        and in_event_loop()
+    )
 
 
 def is_blocking(queryset):
@@ -123,6 +165,73 @@ def _sync_method(original, twin):
     return method
 
 
+def _model_save(original):
+    def save(self, *args, **kwargs):
+        if not in_event_loop():
+            return original(self, *args, **kwargs)
+        using = kwargs.get("using") or router.db_for_write(
+            self.__class__, instance=self
+        )
+        kwargs["using"] = using
+        # Model.async_save, not self.async_save: the sync overrides have
+        # just run, and an async override would repeat their work.
+        return run_blocking(Model.async_save(self, *args, **kwargs), using)
+
+    return save
+
+
+def _model_delete(original):
+    def delete(self, using=None, keep_parents=False):
+        if not in_event_loop():
+            return original(self, using=using, keep_parents=keep_parents)
+        using = using or router.db_for_write(self.__class__, instance=self)
+        return run_blocking(
+            Model.async_delete(self, using=using, keep_parents=keep_parents),
+            using,
+        )
+
+    return delete
+
+
+def _atomic_enter(original):
+    def __enter__(self):
+        if not in_event_loop():
+            return original(self)
+        alias = self.using or DEFAULT_DB_ALIAS
+        block = async_atomic(
+            using=alias, savepoint=self.savepoint, durable=self.durable
+        )
+        run_blocking(block.__aenter__(), alias)
+        _atomics.set(_atomics.get() + ((self, block, alias),))
+
+    return __enter__
+
+
+def _atomic_exit(original):
+    def __exit__(self, exc_type, exc_value, traceback):
+        stack = _atomics.get()
+        if not stack or stack[-1][0] is not self:
+            return original(self, exc_type, exc_value, traceback)
+        _, block, alias = stack[-1]
+        _atomics.set(stack[:-1])
+        return run_blocking(
+            block.__aexit__(exc_type, exc_value, traceback), alias
+        )
+
+    return __exit__
+
+
+def _on_commit(original):
+    def on_commit(self, func, robust=False):
+        if not in_event_loop():
+            return original(self, func, robust)
+        return run_blocking(
+            async_connections[self.alias].on_commit(func, robust), self.alias
+        )
+
+    return on_commit
+
+
 def install():
     if _saved:
         return
@@ -141,6 +250,24 @@ def install():
         original = sync_cls.__dict__.get(name)
         if original is not None:
             _patch(sync_cls, name, _sync_method(original, twin))
+
+    _patch(Model, "save", _model_save(Model.save))
+    _patch(Model, "delete", _model_delete(Model.delete))
+    _patch(
+        transaction.Atomic,
+        "__enter__",
+        _atomic_enter(transaction.Atomic.__enter__),
+    )
+    _patch(
+        transaction.Atomic,
+        "__exit__",
+        _atomic_exit(transaction.Atomic.__exit__),
+    )
+    _patch(
+        BaseDatabaseWrapper,
+        "on_commit",
+        _on_commit(BaseDatabaseWrapper.on_commit),
+    )
 
 
 def uninstall():

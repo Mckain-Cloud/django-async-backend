@@ -270,5 +270,5 @@ class FetchBlockingThreadTests(AsyncioTransactionTestCase):
             pk=root.pk
         )
         await async_connections["default"].close()
-        with self.assertRaisesRegex(BlockingQueryError, "no open async"):
+        with self.assertRaisesRegex(BlockingQueryError, "no open async connection"):
             obj.name

@@ -37,6 +37,7 @@ _WAIT_INTERVAL = 0.1
 
 _seen = set()
 _lock = threading.Lock()
+_running = threading.local()
 
 _SKIP = (
     os.sep + "asgiref" + os.sep,
@@ -85,6 +86,16 @@ def _report(alias):
     )
 
 
+def is_running():
+    """Is this thread inside ``run_blocking()`` right now?
+
+    Signal dispatch uses it to call sync receivers inline, in the sender's
+    transaction, instead of handing them to a worker thread it could not
+    wait for.
+    """
+    return getattr(_running, "depth", 0) > 0
+
+
 def reset_reported():
     with _lock:
         _seen.clear()
@@ -103,9 +114,10 @@ def run_blocking(coro, alias):
     if connection is None:
         coro.close()
         raise BlockingQueryError(
-            "This task has no open async connection for %r to run a "
-            "blocking query on; run an async query first or use the async "
-            "API." % alias
+            "This task has no open async connection for %r, and opening one "
+            "cannot be done blocking. Open it first from async code: `await "
+            "async_connections[%r].ensure_connection()` (any awaited query "
+            "does it too)." % (alias, alias)
         )
     # Private psycopg API: tests/db/test_blocking.py fails if it moves.
     if connection.lock.locked():
@@ -131,6 +143,7 @@ def run_blocking(coro, alias):
     # lazy load inside a lazy load) finds one already there and restores it.
     previous = connection.__dict__.get("wait")
     connection.wait = blocking_wait
+    _running.depth = getattr(_running, "depth", 0) + 1
     try:
         try:
             awaited = coro.send(None)
@@ -144,6 +157,7 @@ def run_blocking(coro, alias):
             "API here." % (awaited,)
         )
     finally:
+        _running.depth -= 1
         if previous is None:
             del connection.wait
         else:

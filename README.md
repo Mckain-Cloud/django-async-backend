@@ -455,9 +455,10 @@ alias). It relies on psycopg internals (`AsyncConnection.wait`, `lock`,
 ### Sync queryset API from async code
 
 `ASYNC_BACKEND_BLOCKING_QUERYSETS = True` extends `FETCH_BLOCKING` from
-attribute reads to querysets. A queryset with that fetch mode can then be
-used through the sync API inside a task, with the same mechanism and the
-same cost (the event loop waits for every query):
+attribute reads to querysets and to writes, with the same mechanism and the
+same cost (the event loop waits for every query). Reads stay opt-in per
+queryset: one with that fetch mode can be used through the sync API inside
+a task.
 
 ```python
 author = await Author.async_objects.fetch_mode(FETCH_BLOCKING).aget(pk=1)
@@ -481,15 +482,49 @@ len(qs), bool(qs), book in qs, list(qs), qs.count(), qs.get(pk=1)
   fetch mode of their instance, so `author.books.all()` is covered once
   `author` came from a `FETCH_BLOCKING` queryset; so are sync templates,
   `Paginator` and serializers that are handed such objects.
-- **Unchanged:** every queryset without the mode (it raises as before), and
-  worker threads (`sync_to_async`), which keep using the sync connection.
-- **Not covered:** `Model.save()` / `delete()`, the related managers'
-  `add()` / `remove()` / `set()` / `clear()`, `iterator()` and sync
-  `transaction.atomic()` still go to the sync connection.
+  A many-to-many manager's `count()` / `exists()` are covered as well.
+- **Unchanged:** every read on a queryset without the mode (it raises as
+  before), and worker threads (`sync_to_async`), which keep using the sync
+  connection.
 
-The setting patches methods on Django's `QuerySet` class at startup; they
-defer to the original unless the queryset has the mode and an event loop is
-running in the thread.
+Writes are explicit calls, and a new object has no queryset to inherit a
+mode from, so with the setting on they block for *any* object whenever an
+event loop is running in the thread:
+
+```python
+with transaction.atomic():                 # async_atomic() on the task's connection
+    book = Book(title="New", author=author)
+    book.save()                            # also update_fields=, force_insert=
+    book.tags.set([t1, t2])                # add() / remove() / clear() / set()
+    transaction.on_commit(notify)          # registered on the async connection
+old.delete()                               # cascades through the async collector
+```
+
+- **`save()` / `delete()`** run the model's own sync overrides and then
+  Django's body on the async connection. A model that overrides both
+  `save()` and `async_save()` gets only the former here, not both.
+- **Signals:** sync receivers fired by a blocking write are called inline,
+  in the transaction (they would otherwise go to a worker thread the write
+  cannot wait for). An async receiver that awaits anything but the database
+  makes the write raise `BlockingQueryError`; so does
+  `ASYNC_BACKEND_SEQUENTIAL_SIGNAL_RECEIVERS = False`.
+- **`transaction.atomic()`** nests with `async_atomic()` in either order
+  (savepoints on the one connection), as a context manager or a decorator.
+- **An open connection is required.** A blocking call cannot open the
+  task's connection (connecting and pool checkout need the event loop), so
+  the first database use in a task must be awaited: any async query, or
+  `await async_connections["default"].ensure_connection()`. Otherwise the
+  call raises `BlockingQueryError` naming that fix.
+- **Not covered:** `iterator()`, `refresh_from_db()`, model validation
+  (`full_clean()`, `validate_unique()`, so a sync `ModelForm.is_valid()`),
+  raw `connection.cursor()`, and the rest of `django.db.transaction`
+  (`savepoint()`, `set_rollback()`, ...) still go to the sync connection and
+  raise in a task.
+
+The setting patches `QuerySet`, `Model.save()` / `delete()`,
+`transaction.Atomic` and `BaseDatabaseWrapper.on_commit` at startup; each
+defers to the original when no event loop is running in the thread (and,
+for reads, unless the queryset has the mode).
 
 ### Custom descriptors
 

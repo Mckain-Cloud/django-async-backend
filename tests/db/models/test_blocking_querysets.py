@@ -1,19 +1,37 @@
+import asyncio
+from unittest import mock
+
 from asgiref.sync import sync_to_async
 from django.core.exceptions import SynchronousOnlyOperation
 from django.core.paginator import Paginator
-from django.db import connections
+from django.db import (
+    connections,
+    transaction,
+)
 from django.db.models import Count
+from django.db.models.signals import (
+    m2m_changed,
+    post_delete,
+    post_save,
+)
 from django.template import (
     Context,
     Template,
 )
-from test_app.models import TestModel
+from test_app.models import (
+    M2MOwnerModel,
+    M2MTagModel,
+    TestModel,
+)
 
+from django_async_backend.db import async_connections
 from django_async_backend.db import blocking as db_blocking
+from django_async_backend.db.blocking import BlockingQueryError
 from django_async_backend.db.models import blocking
 from django_async_backend.db.models import query as async_query
 from django_async_backend.db.models.fetch_modes import FETCH_BLOCKING
 from django_async_backend.db.models.sync_only import SyncOnlyError
+from django_async_backend.db.transaction import async_atomic
 from django_async_backend.test import (
     AsyncioTestCase,
     AsyncioTransactionTestCase,
@@ -204,10 +222,6 @@ class SyncQuerySetBlockingTests(_Installed, AsyncioTestCase):
         self.assertEqual(self.manager.filter(name="renamed").delete()[0], 1)
         self.assertEqual(await TestModel.async_objects.acount(), N + 2)
 
-    async def test_model_save_is_not_covered(self):
-        with self.assertRaises(SynchronousOnlyOperation):
-            self.obj.save()
-
     async def test_call_site_is_logged(self):
         with self.assertLogs("django_async_backend.blocking", "WARNING") as cm:
             self.obj.relatives.count()
@@ -237,3 +251,238 @@ class SyncQuerySetThreadTests(_Installed, AsyncioTransactionTestCase):
             count = await sync_to_async(manager.count)()
         self.assertEqual(names, ["committed"])
         self.assertEqual(count, 1)
+
+
+class SyncWriteBlockingTests(_Installed, AsyncioTestCase):
+    async def asyncSetUp(self):
+        db_blocking.reset_reported()
+
+    async def test_save_a_new_instance(self):
+        obj = TestModel(name="new")
+        obj.save()
+        self.assertIsNotNone(obj.pk)
+        self.assertFalse(obj._state.adding)
+        self.assertEqual(await TestModel.async_objects.aget(pk=obj.pk), obj)
+
+    async def test_save_update_fields(self):
+        obj = await TestModel.async_objects.acreate(name="old")
+        obj.name = "new"
+        async with self.assertNumQueries(1):
+            obj.save(update_fields=["name"])
+        self.assertTrue(
+            await TestModel.async_objects.filter(name="new").aexists()
+        )
+
+    async def test_save_runs_djangos_body_not_an_async_override(self):
+        obj = TestModel(name="new")
+        with mock.patch.object(
+            TestModel, "async_save", side_effect=AssertionError, create=True
+        ):
+            obj.save()
+        self.assertIsNotNone(obj.pk)
+
+    async def test_delete_cascades(self):
+        root = await TestModel.async_objects.acreate(name="root")
+        await TestModel.async_objects.acreate(name="child", relative=root)
+        deleted, per_model = root.delete()
+        self.assertEqual(deleted, 2)
+        self.assertEqual(per_model, {"test_app.TestModel": 2})
+        self.assertEqual(await TestModel.async_objects.acount(), 0)
+
+    async def test_sync_receivers_run_inline_in_the_transaction(self):
+        seen = []
+
+        def on_save(sender, instance, created, **kwargs):
+            visible = (
+                TestModel.objects.fetch_mode(FETCH_BLOCKING)
+                .filter(pk=instance.pk)
+                .exists()
+            )
+            seen.append(("save", created, visible))
+
+        def on_delete(sender, instance, **kwargs):
+            seen.append(("delete", instance.name))
+
+        async def async_on_save(sender, instance, **kwargs):
+            seen.append(("async", await TestModel.async_objects.acount()))
+
+        post_save.connect(on_save, sender=TestModel)
+        post_save.connect(async_on_save, sender=TestModel)
+        post_delete.connect(on_delete, sender=TestModel)
+        try:
+            obj = TestModel(name="new")
+            obj.save()
+            obj.delete()
+        finally:
+            post_save.disconnect(on_save, sender=TestModel)
+            post_save.disconnect(async_on_save, sender=TestModel)
+            post_delete.disconnect(on_delete, sender=TestModel)
+        self.assertEqual(
+            seen, [("save", True, True), ("async", 1), ("delete", "new")]
+        )
+
+    async def test_receiver_that_awaits_other_io_is_refused(self):
+        async def slow(sender, **kwargs):
+            await asyncio.sleep(0.01)
+
+        post_save.connect(slow, sender=TestModel)
+        try:
+            with self.assertRaises(BlockingQueryError):
+                with transaction.atomic():
+                    TestModel(name="new").save()
+        finally:
+            post_save.disconnect(slow, sender=TestModel)
+        self.assertEqual(await TestModel.async_objects.acount(), 0)
+
+    async def test_atomic_rolls_back(self):
+        with self.assertRaisesRegex(ValueError, "boom"):
+            with transaction.atomic():
+                TestModel(name="gone").save()
+                raise ValueError("boom")
+        self.assertEqual(await TestModel.async_objects.acount(), 0)
+
+    async def test_atomic_nests_with_async_atomic_and_decorator(self):
+        @transaction.atomic
+        def create(name, fail=False):
+            TestModel(name=name).save()
+            if fail:
+                raise ValueError(name)
+
+        connection = async_connections["default"]
+        depth = len(connection.savepoint_ids)
+        async with async_atomic():
+            with transaction.atomic():
+                create("kept")
+                with self.assertRaises(ValueError):
+                    create("dropped", fail=True)
+                self.assertEqual(len(connection.savepoint_ids), depth + 2)
+        self.assertEqual(len(connection.savepoint_ids), depth)
+        self.assertEqual(
+            [o.name async for o in TestModel.async_objects.all()], ["kept"]
+        )
+
+    async def test_on_commit_registers_on_the_async_connection(self):
+        fired = []
+        async with self.captureOnCommitCallbacks(execute=True) as callbacks:
+            with transaction.atomic():
+                transaction.on_commit(lambda: fired.append(1))
+        self.assertEqual(len(callbacks), 1)
+        self.assertEqual(fired, [1])
+
+    async def test_many_to_many_writes(self):
+        owner = await M2MOwnerModel.async_objects.acreate(name="owner")
+        tags = [
+            await M2MTagModel.async_objects.acreate(name="tag-%d" % i)
+            for i in range(3)
+        ]
+        events = []
+
+        def on_change(sender, action, **kwargs):
+            events.append(action)
+
+        m2m_changed.connect(on_change, sender=M2MOwnerModel.tags.through)
+        try:
+            owner.tags.add(tags[0], tags[1])
+        finally:
+            m2m_changed.disconnect(
+                on_change, sender=M2MOwnerModel.tags.through
+            )
+        self.assertEqual(events, ["pre_add", "post_add"])
+        self.assertEqual(await owner.tags.async_objects.acount(), 2)
+        owner.tags.remove(tags[0])
+        self.assertEqual(await owner.tags.async_objects.acount(), 1)
+        owner.tags.set(tags)
+        self.assertEqual(await owner.tags.async_objects.acount(), 3)
+        tags[0].owners.clear()
+        self.assertEqual(await owner.tags.async_objects.acount(), 2)
+        created = owner.tags.create(name="made")
+        self.assertEqual(created.name, "made")
+        self.assertEqual(await owner.tags.async_objects.acount(), 3)
+
+    async def test_many_to_many_count_and_exists(self):
+        owner = await M2MOwnerModel.async_objects.acreate(name="owner")
+        tag = await M2MTagModel.async_objects.acreate(name="tag")
+        opted_in = await M2MOwnerModel.async_objects.fetch_mode(
+            FETCH_BLOCKING
+        ).aget(pk=owner.pk)
+        self.assertFalse(opted_in.tags.exists())
+        opted_in.tags.add(tag)
+        self.assertEqual(opted_in.tags.count(), 1)
+        self.assertTrue(opted_in.tags.exists())
+        self.assertEqual([t.name for t in opted_in.tags.all()], ["tag"])
+        # Reads still need the mode.
+        with self.assertRaises(SynchronousOnlyOperation):
+            owner.tags.count()
+
+    async def test_reverse_foreign_key_writes(self):
+        root = await TestModel.async_objects.acreate(name="root")
+        a = await TestModel.async_objects.acreate(name="a")
+        b = await TestModel.async_objects.acreate(name="b")
+        root.relatives.add(a, b)
+        self.assertEqual(await root.relatives.async_objects.acount(), 2)
+        root.relatives.remove(a)
+        self.assertEqual(await root.relatives.async_objects.acount(), 1)
+        root.relatives.set([a])
+        self.assertEqual(
+            [o.name async for o in root.relatives.async_objects.all()], ["a"]
+        )
+        root.relatives.clear()
+        self.assertEqual(await root.relatives.async_objects.acount(), 0)
+
+
+class SyncWriteCommitTests(_Installed, AsyncioTransactionTestCase):
+    async def asyncTearDown(self):
+        await sync_to_async(connections.close_all)()
+
+    async def test_first_use_in_a_task_needs_an_open_connection(self):
+        with self.assertRaisesRegex(BlockingQueryError, "ensure_connection"):
+            TestModel(name="new").save()
+        await async_connections["default"].ensure_connection()
+        TestModel(name="new").save()
+        self.assertEqual(await TestModel.async_objects.acount(), 1)
+
+    async def test_atomic_commits_and_runs_on_commit(self):
+        await async_connections["default"].ensure_connection()
+        fired = []
+        with transaction.atomic():
+            TestModel(name="kept").save()
+            transaction.on_commit(lambda: fired.append("committed"))
+            self.assertEqual(fired, [])
+        self.assertEqual(fired, ["committed"])
+        with self.assertRaises(ValueError):
+            with transaction.atomic():
+                TestModel(name="dropped").save()
+                raise ValueError
+        # A different connection sees exactly the committed row.
+        names = await sync_to_async(
+            lambda: list(TestModel.objects.values_list("name", flat=True))
+        )()
+        self.assertEqual(names, ["kept"])
+
+    async def test_worker_thread_writes_use_the_sync_connection(self):
+        def work():
+            with transaction.atomic():
+                obj = TestModel(name="threaded")
+                obj.save()
+            return obj.pk
+
+        with self.assertNoLogs("django_async_backend.blocking", "WARNING"):
+            pk = await sync_to_async(work)()
+        self.assertTrue(await TestModel.async_objects.filter(pk=pk).aexists())
+
+
+class NotInstalledTests(AsyncioTestCase):
+    async def test_writes_still_raise(self):
+        owner = await M2MOwnerModel.async_objects.acreate(name="owner")
+        tag = await M2MTagModel.async_objects.acreate(name="tag")
+        with self.assertRaises(SynchronousOnlyOperation):
+            TestModel(name="new").save()
+        with self.assertRaises(SynchronousOnlyOperation):
+            owner.delete()
+        with self.assertRaises(SynchronousOnlyOperation):
+            owner.tags.add(tag)
+        with self.assertRaises(SynchronousOnlyOperation):
+            with transaction.atomic():
+                pass
+        with self.assertRaises(SynchronousOnlyOperation):
+            transaction.on_commit(lambda: None)

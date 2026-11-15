@@ -744,6 +744,59 @@ def _async_objects_for_generic(rel):
 _patched = False
 
 
+def bridge_related_manager(cls, write_model, constrained=False):
+    """Let the sync manager's writes block on the task's async connection.
+
+    Inert unless ``ASYNC_BACKEND_BLOCKING_QUERYSETS`` is installed and an
+    event loop is running in the thread: then ``add()`` / ``remove()`` /
+    ``clear()`` / ``set()`` run ``async_objects.aadd()``... to completion
+    (``django_async_backend.db.models.blocking``). A many-to-many manager's
+    ``count()`` / ``exists()`` shortcut builds a queryset of its own that
+    does not carry the instance's fetch mode, so those are sent through the
+    manager's queryset when the instance is ``FETCH_BLOCKING``.
+    """
+    from django_async_backend.db.models import blocking
+
+    def write(name, original):
+        def method(self, *args, **kwargs):
+            if blocking.writes_block():
+                alias = router.db_for_write(
+                    write_model(self), instance=self.instance
+                )
+                return blocking.run_blocking(
+                    getattr(self.async_objects, "a" + name)(*args, **kwargs),
+                    alias,
+                )
+            return original(self, *args, **kwargs)
+
+        return method
+
+    def read(name, original):
+        def method(self):
+            if blocking.is_blocking_instance(self.instance):
+                return getattr(self.get_queryset(), name)()
+            return original(self)
+
+        return method
+
+    def install(names, wrap):
+        for name in names:
+            original = cls.__dict__.get(name)
+            if original is None:
+                continue
+            method = wrap(name, original)
+            method.__name__ = name
+            method.__doc__ = original.__doc__
+            for attr in ("alters_data", "queryset_only"):
+                if hasattr(original, attr):
+                    setattr(method, attr, getattr(original, attr))
+            setattr(cls, name, method)
+
+    install(("add", "remove", "clear", "set"), write)
+    if constrained:
+        install(("count", "exists"), read)
+
+
 def patch_related_managers():
     """Give every Django related manager an ``async_objects`` property.
 
@@ -763,12 +816,16 @@ def patch_related_managers():
         cls = original_reverse(superclass, rel)
         if not issubclass(superclass, AsyncManager):
             cls.async_objects = _async_objects_for_reverse(rel)
+            bridge_related_manager(cls, lambda self: self.model)
         return cls
 
     def m2m_factory(superclass, rel, reverse):
         cls = original_m2m(superclass, rel, reverse)
         if not issubclass(superclass, AsyncManager):
             cls.async_objects = _async_objects_for_m2m(rel, reverse)
+            bridge_related_manager(
+                cls, lambda self: self.through, constrained=True
+            )
         return cls
 
     related_descriptors.create_reverse_many_to_one_manager = reverse_factory
@@ -785,6 +842,7 @@ def patch_related_managers():
         cls = original_generic(superclass, rel)
         if not issubclass(superclass, AsyncManager):
             cls.async_objects = _async_objects_for_generic(rel)
+            bridge_related_manager(cls, lambda self: self.model)
         return cls
 
     generic_fields.create_generic_related_manager = generic_factory
