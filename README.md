@@ -208,7 +208,7 @@ Legend: ✅ supported · ❌ not supported · ⚠️ supported with caveats
 | `Model.objects.distinct`            | ✅        |          |
 | `Model.objects.extra`               | ✅        |          |
 | `Model.objects.reverse`             | ✅        |          |
-| `Model.objects.defer`               | ⚠️        | reading a deferred field in async code raises `SynchronousOnlyOperation`; load it with `await obj.afetch("field")` |
+| `Model.objects.defer`               | ⚠️        | reading a deferred field in async code raises `SynchronousOnlyOperation`; load it with `await obj.afetch("field")`, or opt in to `FETCH_BLOCKING` (see *Lazy loads from sync code*) |
 | `Model.objects.only`                | ⚠️        | same caveat as `defer` |
 | `Model.objects.using`               | ✅        |          |
 | `Model.objects.resolve_expression`  | ✅        |          |
@@ -410,6 +410,47 @@ unpatched (then only `arender*` on templates without custom tags works).
   including each related object of a delete confirmation and each row of
   a `list_editable` changelist; the sync `has_*_permission()` methods read
   that per-request cache.
+
+### Lazy loads from sync code (`FETCH_BLOCKING`)
+
+Reading a deferred field, a forward foreign key or a reverse one-to-one that
+is not loaded makes Django run a query on attribute access. Attribute access
+cannot `await`, so in async code that read raises `SynchronousOnlyOperation`
+(the message names the attribute and `afetch()`). Where the code can await,
+load the value first: `await obj.afetch("author")`, `select_related()`,
+`prefetch_related()`.
+
+Where it cannot (a `__str__`, a property, a serializer or template you do
+not control), a queryset can opt in to loading on access:
+
+```python
+from django_async_backend.db.models.fetch_modes import FETCH_BLOCKING
+
+book = await Book.async_objects.fetch_mode(FETCH_BLOCKING).aget(pk=1)
+book.author.publisher.name   # two queries, each blocks the event loop
+```
+
+The query runs on the task's own async connection, inside its transaction
+(it sees uncommitted rows, unlike a `sync_to_async` hop), and objects loaded
+this way inherit the mode. In a worker thread the mode behaves like Django's
+`FETCH_ONE`.
+
+> [!WARNING]
+> **The event loop is frozen until the query returns**, and with it every
+> other request the worker is serving. One lazy load costs one round trip; a
+> lazy load in a loop is an N+1 that stalls the whole worker (200 of them
+> measured 95–160 ms of frozen loop), and a slow query stalls it for its full
+> duration. Task cancellation and `asyncio.timeout()` cannot interrupt it;
+> only a server-side `statement_timeout` can. Each distinct call site is
+> logged once on the `django_async_backend.blocking` logger
+> (`ASYNC_BACKEND_BLOCKING_QUERIES = "off"` silences it).
+
+A blocking load raises `BlockingQueryError` instead of running when the
+connection is busy (pipeline mode, `cursor.stream()`, `COPY`), when the task
+has no open connection for the alias, or when the load would have to wait
+for something other than its connection (a sync signal receiver, another
+alias). It relies on psycopg internals (`AsyncConnection.wait`, `lock`,
+`_pipeline`); `tests/db/test_blocking.py` pins them.
 
 ### Custom descriptors
 

@@ -64,3 +64,9 @@ class DjangoAsyncBackendConfig(AppConfig):
         from django_async_backend import hops
 
         hops.install(getattr(settings, "ASYNC_BACKEND_SYNC_HOPS", "off"))
+
+        from django_async_backend.db.models.fetch_modes import (
+            patch_fetch_mode_errors,
+        )
+
+        patch_fetch_mode_errors()
