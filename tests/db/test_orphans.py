@@ -1,6 +1,8 @@
 import asyncio
 import contextvars
 import warnings
+from contextlib import contextmanager
+from unittest import mock
 
 from test_app.models import TestModel
 
@@ -25,6 +27,31 @@ async def _drain_closers():
         await asyncio.gather(*list(_closing))
 
 
+@contextmanager
+def _orphan_warnings():
+    """Record the messages of every ``UnclosedConnectionWarning`` raised.
+
+    The reaper warns from the finished task's done callback, which runs in
+    that task's context. On free-threaded builds warning filters are
+    context-local (``-X context_aware_warnings``), so a
+    ``warnings.catch_warnings()`` block in the test never sees it; record at
+    the call instead.
+    """
+    caught = []
+    original = warnings.warn
+
+    def warn(message, category=None, *args, **kwargs):
+        if isinstance(category, type) and issubclass(
+            category, UnclosedConnectionWarning
+        ):
+            caught.append(str(message))
+        else:
+            original(message, category, *args, **kwargs)
+
+    with mock.patch.object(warnings, "warn", warn):
+        yield caught
+
+
 def _isolated(coro):
     """Run ``coro`` in a new task that sees none of the caller's
     connections: the situation of a task spawned outside any request, before
@@ -38,21 +65,15 @@ class OrphanedConnectionTests(AsyncioTransactionTestCase):
             await TestModel.async_objects.acount()
             return async_connections["default"]
 
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always", UnclosedConnectionWarning)
+        with _orphan_warnings() as caught:
             wrapper = await _isolated(child())
             self.assertIsNotNone(wrapper.connection)
             await _drain_closers()
 
         self.assertIsNone(wrapper.connection)
-        messages = [
-            str(w.message)
-            for w in caught
-            if issubclass(w.category, UnclosedConnectionWarning)
-        ]
-        self.assertEqual(len(messages), 1)
-        self.assertIn("alias 'default'", messages[0])
-        self.assertIn("async_acquire()", messages[0])
+        self.assertEqual(len(caught), 1)
+        self.assertIn("alias 'default'", caught[0])
+        self.assertIn("async_acquire()", caught[0])
 
     async def test_open_transaction_is_rolled_back(self):
         async def child():
@@ -61,13 +82,13 @@ class OrphanedConnectionTests(AsyncioTransactionTestCase):
             await TestModel.async_objects.acreate(name="orphan")
             return async_connections["default"]
 
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always", UnclosedConnectionWarning)
+        with _orphan_warnings() as caught:
             wrapper = await _isolated(child())
             await _drain_closers()
 
         self.assertTrue(wrapper.closed_in_transaction)
-        self.assertIn("rolling back", str(caught[0].message))
+        self.assertEqual(len(caught), 1)
+        self.assertIn("rolling back", caught[0])
         self.assertFalse(
             await TestModel.async_objects.filter(name="orphan").aexists()
         )
@@ -78,15 +99,12 @@ class OrphanedConnectionTests(AsyncioTransactionTestCase):
                 await TestModel.async_objects.acount()
             return conn
 
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always", UnclosedConnectionWarning)
+        with _orphan_warnings() as caught:
             wrapper = await _isolated(child())
             await _drain_closers()
 
         self.assertIsNone(wrapper.connection)
-        self.assertEqual(
-            [w for w in caught if w.category is UnclosedConnectionWarning], []
-        )
+        self.assertEqual(caught, [])
 
     async def test_closed_connection_is_not_warned_about(self):
         async def child():
@@ -95,14 +113,11 @@ class OrphanedConnectionTests(AsyncioTransactionTestCase):
             await conn.close()
             return conn
 
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always", UnclosedConnectionWarning)
+        with _orphan_warnings() as caught:
             await _isolated(child())
             await _drain_closers()
 
-        self.assertEqual(
-            [w for w in caught if w.category is UnclosedConnectionWarning], []
-        )
+        self.assertEqual(caught, [])
 
     async def test_discarded_connections_leave_no_callbacks_behind(self):
         # A long-lived task (a websocket loop) acquiring a connection per
@@ -137,8 +152,7 @@ class OrphanedConnectionTests(AsyncioTransactionTestCase):
             await TestModel.async_objects.acount()
             return async_connections["default"]
 
-        with warnings.catch_warnings(record=True):
-            warnings.simplefilter("always", UnclosedConnectionWarning)
+        with _orphan_warnings() as caught:
             wrappers = await asyncio.gather(
                 *(_isolated(child()) for _ in range(3))
             )
@@ -146,3 +160,4 @@ class OrphanedConnectionTests(AsyncioTransactionTestCase):
 
         self.assertEqual(len({id(w) for w in wrappers}), 3)
         self.assertTrue(all(w.connection is None for w in wrappers))
+        self.assertEqual(len(caught), 3)
