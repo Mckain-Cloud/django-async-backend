@@ -244,10 +244,10 @@ transaction, so an error in one aborts the rest; only reads are batched.
 | methods            | supported | comments |
 | ------------------ | --------- | -------- |
 | `__aiter__`        | ✅        |          |
-| `__iter__`         | ⚠️        | raises `TypeError` — use `async for obj in qs` |
-| `__len__`          | ⚠️        | raises `TypeError` — use `await qs.acount()` |
-| `__contains__`     | ⚠️        | falls back to `__iter__`, so it raises `TypeError` too |
-| `__bool__`         | ⚠️        | truth-testing falls back to `__len__`, so `if qs:` raises `TypeError` — use `await qs.aexists()` |
+| `__iter__`         | ⚠️        | raises `TypeError` — use `async for obj in qs` (or opt in, see *Sync queryset API from async code*) |
+| `__len__`          | ⚠️        | raises `TypeError` — use `await qs.acount()` (same opt-in) |
+| `__contains__`     | ⚠️        | falls back to `__iter__`, so it raises `TypeError` too — use `await qs.acontains(obj)` (same opt-in) |
+| `__bool__`         | ⚠️        | `if qs:` raises `TypeError` (Django's inherited `__bool__` would evaluate synchronously) — use `await qs.aexists()` (same opt-in) |
 | `__repr__`         | ✅        |          |
 | `__and__`          | ✅        |          |
 | `__or__`           | ✅        |          |
@@ -451,6 +451,45 @@ has no open connection for the alias, or when the load would have to wait
 for something other than its connection (a sync signal receiver, another
 alias). It relies on psycopg internals (`AsyncConnection.wait`, `lock`,
 `_pipeline`); `tests/db/test_blocking.py` pins them.
+
+### Sync queryset API from async code
+
+`ASYNC_BACKEND_BLOCKING_QUERYSETS = True` extends `FETCH_BLOCKING` from
+attribute reads to querysets. A queryset with that fetch mode can then be
+used through the sync API inside a task, with the same mechanism and the
+same cost (the event loop waits for every query):
+
+```python
+author = await Author.async_objects.fetch_mode(FETCH_BLOCKING).aget(pk=1)
+
+for book in author.books.all():        # Django's own related manager
+    ...
+author.books.count()
+Book.objects.fetch_mode(FETCH_BLOCKING).filter(author=author).first()
+
+qs = Book.async_objects.fetch_mode(FETCH_BLOCKING)
+len(qs), bool(qs), book in qs, list(qs), qs.count(), qs.get(pk=1)
+```
+
+- **The async `QuerySet`:** iteration, `len()`, truth-testing, `in` and the
+  sync-only methods (`get()`, `count()`, `exists()`, `first()`, `last()`,
+  `aggregate()`, `in_bulk()`, `create()`, `update()`, `delete()`, ...) run
+  their async twin. Indexing (`qs[0]`) still returns an awaitable.
+- **Django's `QuerySet`** (`Model.objects`, `obj.<related manager>`):
+  evaluation and the same methods run on the task's async connection, with
+  `select_related()` and `prefetch_related()`. Related managers copy the
+  fetch mode of their instance, so `author.books.all()` is covered once
+  `author` came from a `FETCH_BLOCKING` queryset; so are sync templates,
+  `Paginator` and serializers that are handed such objects.
+- **Unchanged:** every queryset without the mode (it raises as before), and
+  worker threads (`sync_to_async`), which keep using the sync connection.
+- **Not covered:** `Model.save()` / `delete()`, the related managers'
+  `add()` / `remove()` / `set()` / `clear()`, `iterator()` and sync
+  `transaction.atomic()` still go to the sync connection.
+
+The setting patches methods on Django's `QuerySet` class at startup; they
+defer to the original unless the queryset has the mode and an event loop is
+running in the thread.
 
 ### Custom descriptors
 

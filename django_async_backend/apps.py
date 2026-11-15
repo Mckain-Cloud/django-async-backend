@@ -70,3 +70,8 @@ class DjangoAsyncBackendConfig(AppConfig):
         )
 
         patch_fetch_mode_errors()
+
+        if getattr(settings, "ASYNC_BACKEND_BLOCKING_QUERYSETS", False):
+            from django_async_backend.db.models import blocking
+
+            blocking.install()
